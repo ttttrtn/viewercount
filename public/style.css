@@ -1,0 +1,105 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.panel {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 20px;
+  background: rgba(20, 20, 25, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  transition: box-shadow 0.4s ease, padding 0.4s ease;
+}
+
+/* Icon wrapper handles the show/hide animation + spacing collapse */
+.icon-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 22px;
+  width: 22px;
+  height: 22px;
+  margin-right: 10px;
+  opacity: 1;
+  transform: translateX(0) scale(1);
+  overflow: hidden;
+  transition:
+    max-width 0.4s ease,
+    width 0.4s ease,
+    margin 0.4s ease,
+    opacity 0.35s ease,
+    transform 0.4s ease;
+}
+
+.icon-wrap.hidden {
+  max-width: 0;
+  width: 0;
+  margin-right: 0;
+  opacity: 0;
+  transform: translateX(-10px) scale(0.6);
+  pointer-events: none;
+}
+
+.icon {
+  width: 22px;
+  height: 22px;
+  display: block;
+  flex-shrink: 0;
+}
+
+.count {
+  font-size: 26px;
+  font-weight: 700;
+  color: #ffffff;
+  line-height: 1;
+  letter-spacing: 0.5px;
+  min-width: 2ch;
+  text-align: center;
+  transition: text-shadow 0.4s ease;
+}
+
+/* Offline state */
+.count.offline {
+  font-size: 18px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Glow states */
+.panel.glow-up {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 18px 2px rgba(46, 204, 113, 0.65);
+}
+
+.panel.glow-down {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35), 0 0 18px 2px rgba(231, 76, 60, 0.65);
+}
+
+.count.glow-up {
+  text-shadow: 0 0 10px rgba(46, 204, 113, 0.9);
+}
+
+.count.glow-down {
+  text-shadow: 0 0 10px rgba(231, 76, 60, 0.9);
+}

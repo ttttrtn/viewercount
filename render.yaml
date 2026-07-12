@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: viewer-counter
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: TWITCH_CLIENT_ID
+        sync: false
+      - key: TWITCH_CLIENT_SECRET
+        sync: false
+      - key: TWITCH_USERNAME
+        sync: false
+      - key: KICK_USERNAME
+        sync: false
+      - key: PORT
+        value: 3000
