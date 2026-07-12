@@ -1,26 +1,23 @@
-# Viewer Counter Overlay (Twitch + Kick)
+# Viewer Counter Overlay (Twitch + Kick + Rumble + TikTok + YouTube)
 
-A lightweight, Render-hosted OBS Browser Source overlay that displays a single
-combined viewer count (Twitch + Kick) in one horizontal row:
+A Render-hosted OBS Browser Source overlay showing a single combined live
+viewer count across five platforms. Only the icons for platforms
+currently live are shown - no gaps, smoothly animated in and out - and
+the combined number animates up/down with a glow whenever it changes.
 
 ```
-[Twitch icon] [Kick icon]   1,800
+[Twitch] [Kick] [YouTube]   3,214
 ```
 
-Built with Node.js, Express, vanilla JavaScript, HTML, and CSS. No React,
-no frontend frameworks.
+If nothing is live:
 
----
+```
+OFFLINE
+```
 
-## Features
-
-- Single combined viewer count — no per-platform numbers shown
-- Transparent background, dark glass panel, blurred, rounded corners
-- Smooth animated count-up/count-down when the number changes
-- Green glow when viewers increase, red glow when viewers decrease
-- Server-side caching (5s) to minimize API calls to Twitch/Kick
-- Automatic Twitch OAuth token fetch, cache, and refresh
-- Returns 0 for either platform when offline
+Built with Node.js, Express, vanilla JS/HTML/CSS for the overlay itself,
+plus one small Python sidecar (TikTokLive.py) purely because TikTok has
+no HTTP API and its only maintained client library is Python.
 
 ---
 
@@ -28,163 +25,207 @@ no frontend frameworks.
 
 ```
 viewer-counter/
-├── server.js
+├── server.js                  # thin Express layer, serves /api/viewers
 ├── package.json
-├── render.yaml
+├── render.yaml                 # defines BOTH Render services below
 ├── .env.example
 ├── README.md
+├── services/
+│   ├── twitch.js               # Twitch Helix, OAuth client-credentials
+│   ├── kick.js                  # Kick official public API, same OAuth style
+│   ├── rumble.js                # Rumble official Live Stream API
+│   ├── youtube.js               # YouTube Data API v3, quota-efficient polling
+│   ├── tiktok.js                 # thin HTTP client -> tiktok-service sidecar
+│   └── viewerManager.js         # fans out to all 5, caches, retries, totals
+├── tiktok-service/               # separate Python microservice
+│   ├── app.py                    # Flask + TikTokLive.py
+│   └── requirements.txt
 └── public/
     ├── index.html
     ├── style.css
     ├── script.js
     └── icons/
         ├── twitch.svg
-        └── kick.svg
+        ├── kick.svg
+        ├── rumble.svg
+        ├── tiktok.svg
+        └── youtube.svg
 ```
+
+Every service module in `services/` exposes the same shape:
+
+```js
+{ live: boolean, viewers: number }
+```
+
+`viewerManager.js` calls all five in parallel, retries a failed one once,
+caches the combined result for 5 seconds, and always serves the last
+known good data if a refresh fails outright - so a blip in one platform's
+API never takes down the whole overlay.
 
 ---
 
-## 1. Local Setup
+## Why TikTok needs a second service
 
-```bash
-npm install
-cp .env.example .env
-# fill in your credentials in .env
-npm start
-```
+TikTok has no official public API for live viewer counts. The best
+maintained option is **TikTokLive.py** (`isaackogan/TikTokLive`), a
+Python-only library. Rather than shelling out to Python from Node for
+every poll, it runs as its own small, always-on Flask service
+(`tiktok-service/app.py`) that:
 
-Visit `http://localhost:3000` to preview the overlay locally.
+- Calls `client.is_live()` on a slow interval while offline (cheap, no
+  websocket).
+- Opens a real connection only once the channel is live, reading the
+  viewer count from `room_info` every few seconds.
+- Automatically falls back to the offline polling loop on disconnect,
+  stream end, or any exception - no manual restart needed.
+
+The main Node app just polls this sidecar's `/status` endpoint over
+plain HTTP via `services/tiktok.js`.
 
 ---
 
-## 2. Environment Variables
+## Environment Variables
 
-| Variable              | Description                                          |
-|------------------------|------------------------------------------------------|
-| `TWITCH_CLIENT_ID`     | Your Twitch application Client ID                    |
-| `TWITCH_CLIENT_SECRET` | Your Twitch application Client Secret                |
-| `TWITCH_USERNAME`      | Twitch channel login name to track (lowercase)       |
-| `KICK_CLIENT_ID`       | Your Kick application Client ID                      |
-| `KICK_CLIENT_SECRET`   | Your Kick application Client Secret                  |
-| `KICK_USERNAME`        | Kick channel slug to track (lowercase)               |
-| `PORT`                 | Port the server listens on (Render sets this itself) |
+| Variable | Platform | Description |
+|---|---|---|
+| `TWITCH_CLIENT_ID` / `TWITCH_CLIENT_SECRET` | Twitch | From the Twitch Developer Console (dev.twitch.tv/console/apps) |
+| `TWITCH_USERNAME` | Twitch | Channel login name (lowercase) |
+| `KICK_CLIENT_ID` / `KICK_CLIENT_SECRET` | Kick | From kick.com/settings -> Developer |
+| `KICK_USERNAME` | Kick | Channel slug (lowercase) |
+| `RUMBLE_API_URL` | Rumble | Full URL from rumble.com/account/livestream-api (already includes auth) |
+| `RUMBLE_API_KEY` | Rumble | Optional, reserved for future Rumble auth - not required today |
+| `RUMBLE_CHANNEL` | Rumble | Optional - only needed if your account has multiple channels |
+| `TIKTOK_USERNAME` | TikTok | Username, set on the **tiktok-service** |
+| `TIKTOK_SERVICE_URL` | TikTok | Public URL of the deployed sidecar, set on the **main service** |
+| `YOUTUBE_API_KEY` | YouTube | From Google Cloud Console, with YouTube Data API v3 enabled |
+| `YOUTUBE_CHANNEL_ID` | YouTube | Your channel's ID (starts with UC...) |
+| `PORT` | - | Set automatically by Render |
 
-### Getting Twitch credentials
+---
 
-1. Go to the [Twitch Developer Console](https://dev.twitch.tv/console/apps).
-2. Register a new application (any name, OAuth redirect URL can be
-   `http://localhost`, category "Application Integration").
-3. Copy the **Client ID** and generate/copy the **Client Secret**.
-4. Use your channel's login name (not display name) as `TWITCH_USERNAME`.
+## Getting credentials per platform
 
-### Getting Kick credentials
+### Twitch
+1. Twitch Developer Console (dev.twitch.tv/console/apps) -> register an app.
+2. Copy Client ID + Secret. Use your channel's login name (not display name).
 
-Kick has an official public API with the same client-credentials OAuth
+### Kick
+Kick's official public API uses the same client-credentials OAuth
 pattern as Twitch:
+1. kick.com/settings -> Developer -> create an application.
+2. Copy Client ID + Secret. Use your channel's URL slug.
 
-1. Log in to Kick and go to **Settings → Developer** (or visit the
-   [Kick Developer Portal](https://kick.com/settings) directly).
-2. Create a new application to get a **Client ID** and **Client Secret**.
-3. Use your channel's URL slug (the part after `kick.com/`) as
-   `KICK_USERNAME`.
+### Rumble
+1. Go to rumble.com/account/livestream-api while logged in.
+2. Copy the full generated URL into `RUMBLE_API_URL` exactly as shown -
+   it already contains your user ID and a live-stream key, so no
+   separate secret needs to be sent per request.
+3. Treat this URL like a password - anyone with it can read your live
+   stream data.
 
-The server automatically requests an app access token from
-`id.kick.com` using these credentials, caches it, and refreshes it before
-it expires — the same way it already handles Twitch.
+### TikTok
+1. Deploy `tiktok-service/` as its **own** Render web service (Python
+   environment) - see deployment steps below.
+2. Set `TIKTOK_USERNAME` on that service.
+3. Copy its public URL into `TIKTOK_SERVICE_URL` on the **main**
+   `viewer-counter` service.
 
----
-
-## 3. Deploy to Render
-
-1. Push this project to a GitHub (or GitLab) repository.
-2. Go to [Render Dashboard](https://dashboard.render.com/) → **New** →
-   **Web Service**.
-3. Connect your repository. Render will detect `render.yaml`
-   automatically (Blueprint deploy), or you can configure manually:
-   - **Environment:** Node
-   - **Build Command:** `npm install`
-   - **Start Command:** `npm start`
-4. Add the environment variables in the **Environment** tab of your
-   Render service:
-   - `TWITCH_CLIENT_ID`
-   - `TWITCH_CLIENT_SECRET`
-   - `TWITCH_USERNAME`
-   - `KICK_USERNAME`
-   - (`PORT` is provided automatically by Render — no need to set it)
-5. Click **Deploy**. Once live, Render gives you a public URL like:
-
-   ```
-   https://viewer-counter.onrender.com
-   ```
+### YouTube
+1. Google Cloud Console -> create an API key, enable **YouTube Data API v3**
+   for the project.
+2. Find your channel ID (Studio -> Settings -> Channel -> Advanced, or
+   view page source of your channel page for "channelId").
+3. The integration is quota-conscious by design: it only spends the
+   expensive search.list call (100 units) once every 5 minutes while
+   offline, and switches to cheap videos.list calls (1 unit) every 15
+   seconds while live.
 
 ---
 
-## 4. Add to OBS
-
-1. In OBS, add a new **Browser Source**.
-2. Set the URL to your Render deployment:
-
-   ```
-   https://viewer-counter.onrender.com
-   ```
-
-3. Configure the source:
-   - **Width:** `300`
-   - **Height:** `80`
-   - ✅ **Shutdown source when not visible:** off (recommended)
-   - ✅ **Transparent background** — enabled automatically since the page
-     background is `transparent` and OBS Browser Source composites with
-     alpha by default.
-4. Position the overlay wherever you'd like on your stream layout.
-
-The overlay will poll `/api/viewers` every 5 seconds and animate the
-combined count smoothly, with a green glow on increase and a red glow on
-decrease.
-
----
-
-## 5. API Endpoint
+## Updated API Response
 
 ```
 GET /api/viewers
 ```
 
-Response:
-
 ```json
 {
-  "twitch": 1240,
-  "kick": 560,
-  "total": 1800,
+  "twitch": 1250,
+  "kick": 410,
+  "rumble": 185,
+  "tiktok": 960,
+  "youtube": 840,
+
   "twitchLive": true,
-  "kickLive": true
+  "kickLive": true,
+  "rumbleLive": true,
+  "tiktokLive": true,
+  "youtubeLive": true,
+
+  "total": 3645,
+  "updated": 1720000000
 }
 ```
 
-The frontend (`script.js`) only ever talks to this single endpoint — it
-never calls Twitch or Kick directly, keeping API credentials server-side
-only.
+`total` always equals the sum of viewers from only the currently-live
+platforms. The frontend only ever talks to this one endpoint.
 
-### Offline platform handling
+---
 
-- If a platform is offline, its `*Live` flag is `false` and its icon is
-  hidden completely — no empty gap is left behind, since hiding an icon
-  collapses its width/margin to zero.
-- Icons fade + slide in when a platform goes live, and fade + slide out
-  when it goes offline, without a page reload.
-- If **both** platforms are offline, the overlay replaces the number with
-  the text `OFFLINE`.
-- The combined count animation (count up/down + glow) keeps working
-  normally whenever at least one platform is live.
+## Deploy to Render
+
+This project deploys as **two** Render services (both defined in
+`render.yaml`, so a single Blueprint deploy sets both up):
+
+1. `viewer-counter` - the main Node overlay (this is the URL you add to OBS).
+2. `viewer-counter-tiktok` - the Python TikTok sidecar (internal use only,
+   nothing to add to OBS).
+
+### Steps
+
+1. Push this project to GitHub.
+2. Render Dashboard -> New -> Blueprint -> connect the repo. Render
+   reads `render.yaml` and proposes both services.
+3. Before/after creating them, set the environment variables from the
+   table above on the correct service:
+   - Twitch / Kick / Rumble / YouTube vars + `TIKTOK_SERVICE_URL` -> on
+     `viewer-counter`
+   - `TIKTOK_USERNAME` -> on `viewer-counter-tiktok`
+4. Deploy `viewer-counter-tiktok` first, copy its resulting URL (e.g.
+   https://viewer-counter-tiktok.onrender.com), and paste it into
+   `viewer-counter`'s `TIKTOK_SERVICE_URL`.
+5. Deploy/redeploy `viewer-counter`. You'll get your overlay URL, e.g.:
+
+   ```
+   https://viewer-counter.onrender.com
+   ```
+
+If you don't stream on TikTok, you can skip deploying the sidecar
+entirely and just leave `TIKTOK_SERVICE_URL` unset - `tiktokLive` will
+simply always report false, and the icon stays hidden.
+
+---
+
+## Add to OBS
+
+1. Add a Browser Source pointing at your main service's URL (not the
+   TikTok sidecar's).
+2. Width 300, Height 80, transparent background enabled.
 
 ---
 
 ## Performance Notes
 
-- The backend caches combined viewer results for 5 seconds, so multiple
-  browser source reloads or tabs won't cause redundant upstream API calls.
-- The Twitch OAuth token is cached in memory and only refreshed once it's
-  close to expiry, avoiding unnecessary token requests.
-- The frontend uses `requestAnimationFrame` for count animations — no
-  timers/intervals left running beyond the 5-second poll — keeping CPU
-  usage minimal, which is ideal for long OBS streaming sessions.
+- `viewerManager.js` caches the combined result for 5 seconds and
+  de-duplicates concurrent requests, so multiple OBS sources or browser
+  tabs never cause redundant upstream calls.
+- Every service retries once on an unexpected error, then falls back to
+  reporting offline rather than crashing the whole endpoint.
+- Rumble and YouTube use internal backoff after failures, so a temporary
+  outage doesn't turn into a hot retry loop.
+- YouTube's polling strategy (5 min offline / 15s live) is designed to
+  stay well under the default 10,000-unit daily quota even with the
+  overlay running 24/7.
+- The frontend uses requestAnimationFrame for animations and cleans up
+  properly - no lingering timers beyond the 5-second poll.

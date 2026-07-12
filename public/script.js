@@ -1,8 +1,12 @@
 (function () {
   const countEl = document.getElementById('count');
   const panelEl = document.getElementById('panel');
-  const twitchWrap = document.getElementById('twitchWrap');
-  const kickWrap = document.getElementById('kickWrap');
+
+  const PLATFORMS = ['twitch', 'kick', 'rumble', 'tiktok', 'youtube'];
+  const wraps = {};
+  PLATFORMS.forEach((key) => {
+    wraps[key] = document.getElementById(`wrap-${key}`);
+  });
 
   const REFRESH_INTERVAL_MS = 5000;
   const ANIMATION_DURATION_MS = 700;
@@ -20,7 +24,9 @@
     return 1 - Math.pow(1 - t, 3);
   }
 
-  function setIconVisibility(wrapEl, visible) {
+  function setIconVisibility(key, visible) {
+    const wrapEl = wraps[key];
+    if (!wrapEl) return;
     if (visible) {
       wrapEl.classList.remove('hidden');
     } else {
@@ -112,14 +118,17 @@
 
       const data = await res.json();
 
-      const twitchLive = Boolean(data.twitchLive);
-      const kickLive = Boolean(data.kickLive);
+      let anyLive = false;
+
+      PLATFORMS.forEach((key) => {
+        const live = Boolean(data[`${key}Live`]);
+        setIconVisibility(key, live);
+        if (live) anyLive = true;
+      });
+
       const total = typeof data.total === 'number' ? data.total : 0;
 
-      setIconVisibility(twitchWrap, twitchLive);
-      setIconVisibility(kickWrap, kickLive);
-
-      if (!twitchLive && !kickLive) {
+      if (!anyLive) {
         showOffline();
         return;
       }

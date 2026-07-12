@@ -1,4 +1,5 @@
 services:
+  # Main overlay web service (Node/Express)
   - type: web
     name: viewer-counter
     env: node
@@ -18,5 +19,32 @@ services:
         sync: false
       - key: KICK_USERNAME
         sync: false
+      - key: RUMBLE_API_URL
+        sync: false
+      - key: RUMBLE_API_KEY
+        sync: false
+      - key: RUMBLE_CHANNEL
+        sync: false
+      - key: TIKTOK_SERVICE_URL
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBE_CHANNEL_ID
+        sync: false
       - key: PORT
         value: 3000
+
+  # TikTok LIVE sidecar (Python, TikTokLive.py + Flask)
+  # Deploy this as its own Render web service, then copy its public URL
+  # into the main service's TIKTOK_SERVICE_URL env var above.
+  - type: web
+    name: viewer-counter-tiktok
+    env: python
+    plan: free
+    buildCommand: pip install -r tiktok-service/requirements.txt
+    startCommand: python tiktok-service/app.py
+    envVars:
+      - key: TIKTOK_USERNAME
+        sync: false
+      - key: PORT
+        value: 5005
