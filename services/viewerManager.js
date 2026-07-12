@@ -30,6 +30,8 @@ function buildEmptyResponse() {
     response[key] = 0;
     response[`${key}Live`] = false;
   }
+  response.youtubeSource = 'official';
+  response.youtubeFallbackActive = false;
   return response;
 }
 
@@ -62,6 +64,15 @@ async function refreshAll() {
 
     response[key] = viewers;
     response[`${key}Live`] = live;
+
+    // The YouTube service additionally reports which underlying data
+    // source (official API vs. unofficial fallback) produced this result.
+    // Other platforms don't have a fallback layer, so these fields are
+    // youtube-specific.
+    if (key === 'youtube') {
+      response.youtubeSource = result && result.source ? result.source : 'official';
+      response.youtubeFallbackActive = Boolean(result && result.fallbackActive);
+    }
 
     if (live) {
       total += viewers;

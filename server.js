@@ -26,6 +26,8 @@ app.get('/api/viewers', async (req, res) => {
       rumbleLive: false,
       tiktokLive: false,
       youtubeLive: false,
+      youtubeSource: 'official',
+      youtubeFallbackActive: false,
       total: 0,
       updated: Math.floor(Date.now() / 1000),
     });
@@ -47,5 +49,6 @@ app.listen(PORT, () => {
   console.log('TIKTOK_SERVICE_URL set:', Boolean(process.env.TIKTOK_SERVICE_URL));
   console.log('YOUTUBE_API_KEY set:', Boolean(process.env.YOUTUBE_API_KEY));
   console.log('YOUTUBE_CHANNEL_ID:', process.env.YOUTUBE_CHANNEL_ID || '(empty)');
+  console.log('DEBUG_YOUTUBE:', Boolean(process.env.DEBUG_YOUTUBE));
   console.log('---------------------');
 });

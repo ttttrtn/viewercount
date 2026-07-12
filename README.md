@@ -34,7 +34,12 @@ viewer-counter/
 │   ├── twitch.js               # Twitch Helix, OAuth client-credentials
 │   ├── kick.js                  # Kick official public API, same OAuth style
 │   ├── rumble.js                # Rumble official Live Stream API
-│   ├── youtube.js               # YouTube Data API v3, quota-efficient polling
+│   ├── youtube/                 # YouTube Data API v3 + unofficial fallback
+│   │   ├── index.js                # orchestrator: failover, cooldown, caching
+│   │   ├── officialProvider.js     # search.list / videos.list, error classification
+│   │   ├── fallbackProvider.js     # youtubei.js-backed unofficial fallback
+│   │   ├── config.js               # env vars, defaults, validation
+│   │   └── logger.js               # DEBUG_YOUTUBE-gated verbose logging
 │   ├── tiktok.js                 # thin HTTP client -> tiktok-service sidecar
 │   └── viewerManager.js         # fans out to all 5, caches, retries, totals
 ├── tiktok-service/               # separate Python microservice
@@ -57,6 +62,9 @@ Every service module in `services/` exposes the same shape:
 ```js
 { live: boolean, viewers: number }
 ```
+
+(The YouTube service returns two extra fields, `source` and
+`fallbackActive` - see "YouTube reliability & fallback" below.)
 
 `viewerManager.js` calls all five in parallel, retries a failed one once,
 caches the combined result for 5 seconds, and always serves the last
@@ -100,6 +108,7 @@ plain HTTP via `services/tiktok.js`.
 | `TIKTOK_SERVICE_URL` | TikTok | Public URL of the deployed sidecar, set on the **main service** |
 | `YOUTUBE_API_KEY` | YouTube | From Google Cloud Console, with YouTube Data API v3 enabled |
 | `YOUTUBE_CHANNEL_ID` | YouTube | Your channel's ID (starts with UC...) |
+| `DEBUG_YOUTUBE` | YouTube | Optional - `true` enables verbose request/response/fallback logging |
 | `PORT` | - | Set automatically by Render |
 
 ---
@@ -135,11 +144,48 @@ pattern as Twitch:
 1. Google Cloud Console -> create an API key, enable **YouTube Data API v3**
    for the project.
 2. Find your channel ID (Studio -> Settings -> Channel -> Advanced, or
-   view page source of your channel page for "channelId").
+   view page source of your channel page for "channelId"). It should
+   look like `UCxxxxxxxxxxxxxxxxxxxxxx` (24 characters) - a @handle,
+   custom URL, or username will *not* work and will cause `search.list`
+   to silently return zero results. The app logs a warning at startup if
+   `YOUTUBE_CHANNEL_ID` doesn't match that shape.
 3. The integration is quota-conscious by design: it only spends the
-   expensive search.list call (100 units) once every 5 minutes while
-   offline, and switches to cheap videos.list calls (1 unit) every 15
+   expensive `search.list` call (100 units) once every 5 minutes while
+   offline, and switches to cheap `videos.list` calls (1 unit) every 15
    seconds while live.
+
+#### YouTube reliability & fallback
+
+The YouTube service (`services/youtube/`) prefers the official Data API
+v3 whenever it's healthy, and automatically fails over to an unofficial
+provider ([youtubei.js](https://github.com/LuanRT/YouTube.js), an
+actively-maintained client for YouTube's internal API - not HTML
+scraping) when the official API:
+
+- has exhausted its quota,
+- has invalid/rejected credentials,
+- hits a network failure or timeout,
+- returns a 5xx error,
+- returns an unparseable/unexpected response, or
+- reports the channel as live but omits `concurrentViewers` (a known,
+  intermittent quirk of the official API - **this was the root cause of
+  the "reports offline while live" bug**: a missing viewer count no
+  longer causes the channel to be marked offline).
+
+Recovery is automatic: the app keeps probing the official API in the
+background while running on the fallback, and switches back once the
+official API is healthy again. A cooldown (`YOUTUBE_SOURCE_SWITCH_COOLDOWN_MS`,
+default 2 minutes) prevents rapidly flapping between sources if the
+official API is intermittently flaky. If *both* sources fail, the last
+known-good result is served for up to `YOUTUBE_STALE_CACHE_MS` (default
+3 minutes) before the channel is finally reported offline. The frontend
+never sees which source is active - it only ever reads `youtubeLive`
+and `total`.
+
+Set `DEBUG_YOUTUBE=true` to log every request/response, parsed fields,
+live/offline reasoning, and fallback activity in detail. Leave it unset
+in normal operation to keep logs quiet. See `.env.example` for the full
+list of tunable polling/backoff/cooldown values.
 
 ---
 
@@ -162,11 +208,18 @@ GET /api/viewers
   "rumbleLive": true,
   "tiktokLive": true,
   "youtubeLive": true,
+  "youtubeSource": "official",
+  "youtubeFallbackActive": false,
 
   "total": 3645,
   "updated": 1720000000
 }
 ```
+
+`youtubeSource` is `"official"` or `"fallback"` depending on which
+provider produced the current YouTube numbers; `youtubeFallbackActive`
+is a convenience boolean mirroring that. These are informational only -
+the frontend overlay ignores them and just reads `youtubeLive`/`total`.
 
 `total` always equals the sum of viewers from only the currently-live
 platforms. The frontend only ever talks to this one endpoint.
@@ -222,8 +275,10 @@ simply always report false, and the icon stays hidden.
   tabs never cause redundant upstream calls.
 - Every service retries once on an unexpected error, then falls back to
   reporting offline rather than crashing the whole endpoint.
-- Rumble and YouTube use internal backoff after failures, so a temporary
-  outage doesn't turn into a hot retry loop.
+- Rumble uses internal backoff after failures, so a temporary outage
+  doesn't turn into a hot retry loop. YouTube has its own more elaborate
+  backoff + automatic fallback + recovery cooldown - see "YouTube
+  reliability & fallback" above.
 - YouTube's polling strategy (5 min offline / 15s live) is designed to
   stay well under the default 10,000-unit daily quota even with the
   overlay running 24/7.
