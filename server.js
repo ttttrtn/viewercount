@@ -8,7 +8,9 @@ const PORT = process.env.PORT || 3000;
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID || '';
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET || '';
 const TWITCH_USERNAME = (process.env.TWITCH_USERNAME || '').toLowerCase();
-const KICK_USERNAME = process.env.KICK_USERNAME || '';
+const KICK_CLIENT_ID = process.env.KICK_CLIENT_ID || '';
+const KICK_CLIENT_SECRET = process.env.KICK_CLIENT_SECRET || '';
+const KICK_USERNAME = (process.env.KICK_USERNAME || '').toLowerCase();
 
 // ---------- Twitch OAuth token cache ----------
 let twitchToken = null;
@@ -100,30 +102,108 @@ async function getTwitchViewers() {
   }
 }
 
-// ---------- Kick integration ----------
+// ---------- Kick OAuth token cache (official public API) ----------
+let kickToken = null;
+let kickTokenExpiresAt = 0; // epoch ms
+
+async function getKickToken() {
+  const now = Date.now();
+
+  // Reuse cached token if still valid (with 60s safety margin)
+  if (kickToken && now < kickTokenExpiresAt - 60000) {
+    return kickToken;
+  }
+
+  if (!KICK_CLIENT_ID || !KICK_CLIENT_SECRET) {
+    throw new Error('Missing Kick credentials');
+  }
+
+  const res = await fetch('https://id.kick.com/oauth/token', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials',
+      client_id: KICK_CLIENT_ID,
+      client_secret: KICK_CLIENT_SECRET,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Kick token request failed: ${res.status} ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  kickToken = data.access_token;
+  kickTokenExpiresAt = now + data.expires_in * 1000;
+
+  return kickToken;
+}
+
+async function fetchKickChannel(token) {
+  return fetch(
+    `https://api.kick.com/public/v1/channels?slug=${encodeURIComponent(
+      KICK_USERNAME
+    )}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+      },
+    }
+  );
+}
+
 async function getKickViewers() {
   try {
-    if (!KICK_USERNAME) return { viewers: 0, live: false };
-
-    const res = await fetch(
-      `https://kick.com/api/v2/channels/${encodeURIComponent(KICK_USERNAME)}`,
-      {
-        headers: {
-          Accept: 'application/json',
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
-        },
-      }
-    );
-
-    if (!res.ok) return { viewers: 0, live: false };
-
-    const data = await res.json();
-
-    if (data && data.livestream && data.livestream.is_live) {
-      return { viewers: data.livestream.viewer_count || 0, live: true };
+    if (!KICK_USERNAME) {
+      console.error(
+        'KICK_USERNAME is not set (empty string). Skipping Kick check.'
+      );
+      return { viewers: 0, live: false };
     }
 
+    if (!KICK_CLIENT_ID || !KICK_CLIENT_SECRET) {
+      console.error(
+        'KICK_CLIENT_ID / KICK_CLIENT_SECRET not set. Skipping Kick check.'
+      );
+      return { viewers: 0, live: false };
+    }
+
+    const token = await getKickToken();
+    let res = await fetchKickChannel(token);
+
+    if (res.status === 401) {
+      // Token invalid/expired unexpectedly - force refresh once
+      kickToken = null;
+      kickTokenExpiresAt = 0;
+      const freshToken = await getKickToken();
+      res = await fetchKickChannel(freshToken);
+    }
+
+    if (!res.ok) {
+      const bodyPreview = await res.text().catch(() => '');
+      console.error(
+        `Kick API returned ${res.status} for "${KICK_USERNAME}". Body preview:`,
+        bodyPreview.slice(0, 300)
+      );
+      return { viewers: 0, live: false };
+    }
+
+    const json = await res.json();
+    const channel = json.data && json.data[0];
+    const stream = channel && channel.stream;
+
+    if (stream && stream.is_live) {
+      console.log(
+        `Kick: "${KICK_USERNAME}" is LIVE with ${stream.viewer_count} viewers.`
+      );
+      return { viewers: stream.viewer_count || 0, live: true };
+    }
+
+    console.log(`Kick: "${KICK_USERNAME}" detected as OFFLINE.`);
     return { viewers: 0, live: false };
   } catch (err) {
     console.error('Kick error:', err.message);
@@ -207,4 +287,12 @@ app.get('/api/viewers', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Viewer counter overlay running on port ${PORT}`);
+  console.log('--- Config check ---');
+  console.log('TWITCH_CLIENT_ID set:', Boolean(TWITCH_CLIENT_ID));
+  console.log('TWITCH_CLIENT_SECRET set:', Boolean(TWITCH_CLIENT_SECRET));
+  console.log('TWITCH_USERNAME:', TWITCH_USERNAME || '(empty)');
+  console.log('KICK_CLIENT_ID set:', Boolean(KICK_CLIENT_ID));
+  console.log('KICK_CLIENT_SECRET set:', Boolean(KICK_CLIENT_SECRET));
+  console.log('KICK_USERNAME:', KICK_USERNAME || '(empty)');
+  console.log('---------------------');
 });

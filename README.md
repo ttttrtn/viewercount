@@ -64,7 +64,9 @@ Visit `http://localhost:3000` to preview the overlay locally.
 | `TWITCH_CLIENT_ID`     | Your Twitch application Client ID                    |
 | `TWITCH_CLIENT_SECRET` | Your Twitch application Client Secret                |
 | `TWITCH_USERNAME`      | Twitch channel login name to track (lowercase)       |
-| `KICK_USERNAME`        | Kick channel username to track                       |
+| `KICK_CLIENT_ID`       | Your Kick application Client ID                      |
+| `KICK_CLIENT_SECRET`   | Your Kick application Client Secret                  |
+| `KICK_USERNAME`        | Kick channel slug to track (lowercase)               |
 | `PORT`                 | Port the server listens on (Render sets this itself) |
 
 ### Getting Twitch credentials
@@ -75,7 +77,20 @@ Visit `http://localhost:3000` to preview the overlay locally.
 3. Copy the **Client ID** and generate/copy the **Client Secret**.
 4. Use your channel's login name (not display name) as `TWITCH_USERNAME`.
 
-Kick requires no API key — only your channel username.
+### Getting Kick credentials
+
+Kick has an official public API with the same client-credentials OAuth
+pattern as Twitch:
+
+1. Log in to Kick and go to **Settings → Developer** (or visit the
+   [Kick Developer Portal](https://kick.com/settings) directly).
+2. Create a new application to get a **Client ID** and **Client Secret**.
+3. Use your channel's URL slug (the part after `kick.com/`) as
+   `KICK_USERNAME`.
+
+The server automatically requests an app access token from
+`id.kick.com` using these credentials, caches it, and refreshes it before
+it expires — the same way it already handles Twitch.
 
 ---
 
@@ -173,4 +188,3 @@ only.
 - The frontend uses `requestAnimationFrame` for count animations — no
   timers/intervals left running beyond the 5-second poll — keeping CPU
   usage minimal, which is ideal for long OBS streaming sessions.
-"# viewercount" 
