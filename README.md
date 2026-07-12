@@ -173,3 +173,4 @@ only.
 - The frontend uses `requestAnimationFrame` for count animations — no
   timers/intervals left running beyond the 5-second poll — keeping CPU
   usage minimal, which is ideal for long OBS streaming sessions.
+"# viewercount" 
