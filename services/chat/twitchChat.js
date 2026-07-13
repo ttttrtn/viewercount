@@ -12,6 +12,10 @@
 // reused here as the channel to join.
 
 const WebSocket = require('ws');
+const twitchBadges = require('./badges/twitchBadges');
+const badgeCache = require('./badges/badgeCache');
+
+const DEBUG_BADGES = process.env.DEBUG_BADGES === 'true';
 
 const TWITCH_USERNAME = (process.env.TWITCH_USERNAME || '').toLowerCase();
 const IRC_URL = 'wss://irc-ws.chat.twitch.tv:443';
@@ -46,7 +50,7 @@ function parseTags(tagString) {
 
 function parsePrivmsg(line) {
   // Example:
-  // @badge-info=;color=#9146FF;display-name=User123;...  :user123!user123@user123.tmi.twitch.tv PRIVMSG #channel :Hello!
+  // @badge-info=;color=#9146FF;display-name=User123;badges=moderator/1,subscriber/12;...  :user123!user123@user123.tmi.twitch.tv PRIVMSG #channel :Hello!
   let tagString = '';
   let rest = line;
 
@@ -68,7 +72,46 @@ function parsePrivmsg(line) {
     message,
     color: tags.color || null,
     timestamp: Math.floor(Date.now() / 1000),
+    rawBadges: tags.badges || '', // e.g. "moderator/1,subscriber/12" - resolved async below
   };
+}
+
+// Turns the raw "set/version,set/version" IRC badges tag into real,
+// resolved badge objects using Twitch's own Helix badge metadata (no
+// hardcoded/guessed titles or assets).
+async function resolveBadges(rawBadges) {
+  if (!rawBadges) return [];
+
+  const pairs = rawBadges
+    .split(',')
+    .map((pair) => pair.split('/'))
+    .filter(([setId, versionId]) => setId && versionId);
+
+  const resolved = await Promise.all(
+    pairs.map(async ([setId, versionId]) => {
+      const meta = await twitchBadges.resolveBadge(setId, versionId);
+      if (!meta) return null;
+
+      const icon = await badgeCache.ensureCached('twitch', setId, versionId, meta.imageUrl);
+
+      return {
+        id: setId,
+        name: meta.name,
+        platform: 'twitch',
+        version: versionId,
+        icon: icon || undefined,
+      };
+    })
+  );
+
+  const badges = resolved.filter(Boolean);
+
+  if (DEBUG_BADGES) {
+    console.log(`[twitchChat] Raw badges: ${rawBadges}`);
+    console.log(`[twitchChat] Parsed: ${badges.map((b) => b.name).join(', ') || '(none)'}`);
+  }
+
+  return badges;
 }
 
 function scheduleReconnect() {
@@ -116,7 +159,15 @@ function connect() {
 
       if (line.includes('PRIVMSG')) {
         const parsed = parsePrivmsg(line);
-        if (parsed && onMessageCb) onMessageCb(parsed);
+        if (!parsed || !onMessageCb) return;
+
+        const { rawBadges, ...base } = parsed;
+        resolveBadges(rawBadges)
+          .then((badges) => onMessageCb({ ...base, badges }))
+          .catch((err) => {
+            console.error('[twitchChat] badge resolution error:', err.message);
+            onMessageCb({ ...base, badges: [] });
+          });
       }
     });
   });
@@ -142,6 +193,9 @@ function start(onMessage, onStatus) {
     console.error('[twitchChat] TWITCH_USERNAME is not set. Skipping Twitch chat.');
     return;
   }
+
+  twitchBadges.ensureLoaded();
+  twitchBadges.startAutoRefresh();
 
   connect();
 }

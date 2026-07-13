@@ -22,6 +22,9 @@
 // KICK_PUSHER_APP_KEY.
 
 const WebSocket = require('ws');
+const kickBadges = require('./badges/kickBadges');
+
+const DEBUG_BADGES = process.env.DEBUG_BADGES === 'true';
 
 const KICK_USERNAME = (process.env.KICK_USERNAME || '').toLowerCase();
 const KICK_CHATROOM_ID_OVERRIDE = process.env.KICK_CHATROOM_ID || '';
@@ -40,6 +43,9 @@ let stopped = false;
 let onMessageCb = null;
 let onStatusCb = null;
 let chatroomId = null;
+let subscriberBadges = [];
+let subscriberBadgesLastFetch = 0;
+const SUBSCRIBER_BADGES_REFRESH_MS = 6 * 60 * 60 * 1000; // channel's badge art rarely changes
 
 function isConfigured() {
   return Boolean(KICK_USERNAME);
@@ -49,24 +55,7 @@ async function resolveChatroomId() {
   if (KICK_CHATROOM_ID_OVERRIDE) return KICK_CHATROOM_ID_OVERRIDE;
 
   try {
-    const res = await fetch(
-      `https://kick.com/api/v2/channels/${encodeURIComponent(KICK_USERNAME)}`,
-      {
-        headers: {
-          Accept: 'application/json',
-          // A browser-like UA improves the odds of getting past Kick's
-          // bot mitigation for this read-only lookup.
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-        },
-      }
-    );
-
-    if (!res.ok) {
-      throw new Error(`channel lookup returned ${res.status}`);
-    }
-
-    const data = await res.json();
+    const data = await fetchChannelData();
     const id = data && data.chatroom && data.chatroom.id;
 
     if (!id) throw new Error('response had no chatroom.id');
@@ -78,6 +67,46 @@ async function resolveChatroomId() {
         'Set KICK_CHATROOM_ID manually (see comment at top of services/chat/kickChat.js) to bypass this lookup.'
     );
     return null;
+  }
+}
+
+async function fetchChannelData() {
+  const res = await fetch(
+    `https://kick.com/api/v2/channels/${encodeURIComponent(KICK_USERNAME)}`,
+    {
+      headers: {
+        Accept: 'application/json',
+        // A browser-like UA improves the odds of getting past Kick's
+        // bot mitigation for this read-only lookup.
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      },
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`channel lookup returned ${res.status}`);
+  }
+
+  const data = await res.json();
+
+  // Real per-channel subscriber badge tiers (months + actual uploaded badge
+  // image) - used to resolve real subscriber badge icons. Cached here since
+  // it's the same endpoint kickChat.js already hits for chatroom_id.
+  if (Array.isArray(data.subscriber_badges)) {
+    subscriberBadges = data.subscriber_badges;
+    subscriberBadgesLastFetch = Date.now();
+  }
+
+  return data;
+}
+
+async function refreshSubscriberBadgesIfStale() {
+  if (Date.now() - subscriberBadgesLastFetch < SUBSCRIBER_BADGES_REFRESH_MS) return;
+  try {
+    await fetchChannelData();
+  } catch (err) {
+    console.error('[kickChat] failed to refresh subscriber badge tiers:', err.message);
   }
 }
 
@@ -153,15 +182,39 @@ async function connect() {
         const payload = typeof parsed.data === 'string' ? JSON.parse(parsed.data) : parsed.data;
         const message = payload.message || payload;
         const sender = payload.sender || payload.user || {};
+        const rawBadges = (sender.identity && sender.identity.badges) || [];
 
-        if (onMessageCb) {
-          onMessageCb({
-            username: sender.username || 'unknown',
-            message: message.message || message.content || '',
-            color: (sender.identity && sender.identity.color) || null,
-            timestamp: Math.floor(Date.now() / 1000),
-          });
+        if (DEBUG_BADGES && rawBadges.length) {
+          console.log(`[kickChat] Raw badges for ${sender.username}: ${JSON.stringify(rawBadges)}`);
         }
+
+        refreshSubscriberBadgesIfStale();
+
+        kickBadges
+          .resolveBadges(rawBadges, subscriberBadges)
+          .then((badges) => {
+            if (onMessageCb) {
+              onMessageCb({
+                username: sender.username || 'unknown',
+                message: message.message || message.content || '',
+                color: (sender.identity && sender.identity.color) || null,
+                timestamp: Math.floor(Date.now() / 1000),
+                badges,
+              });
+            }
+          })
+          .catch((err) => {
+            console.error('[kickChat] badge resolution error:', err.message);
+            if (onMessageCb) {
+              onMessageCb({
+                username: sender.username || 'unknown',
+                message: message.message || message.content || '',
+                color: (sender.identity && sender.identity.color) || null,
+                timestamp: Math.floor(Date.now() / 1000),
+                badges: [],
+              });
+            }
+          });
       } catch (err) {
         console.error('[kickChat] failed to parse chat message payload:', err.message);
       }

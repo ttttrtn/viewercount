@@ -8,6 +8,8 @@
 // YOUTUBE_CHAT_SERVICE_URL - base URL of the deployed sidecar, e.g.
 //                             https://your-youtube-chat.onrender.com
 
+const youtubeBadges = require('./badges/youtubeBadges');
+
 const YOUTUBE_CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || '';
 const YOUTUBE_CHAT_SERVICE_URL = (process.env.YOUTUBE_CHAT_SERVICE_URL || '').replace(/\/+$/, '');
 
@@ -55,16 +57,23 @@ async function pollOnce() {
 
     const messages = Array.isArray(data.messages) ? data.messages : [];
     messages.forEach((m) => {
-      if (onMessageCb) {
-        onMessageCb({
-          username: m.author || 'unknown',
-          message: m.message || '',
-          color: null,
-          timestamp: m.timestamp
-            ? Math.floor(m.timestamp / (m.timestamp > 1e12 ? 1000 : 1))
-            : Math.floor(Date.now() / 1000),
+      if (!onMessageCb) return;
+      const base = {
+        username: m.author || 'unknown',
+        message: m.message || '',
+        color: null,
+        timestamp: m.timestamp
+          ? Math.floor(m.timestamp / (m.timestamp > 1e12 ? 1000 : 1))
+          : Math.floor(Date.now() / 1000),
+      };
+
+      youtubeBadges
+        .resolveBadges(m.badges)
+        .then((badges) => onMessageCb({ ...base, badges }))
+        .catch((err) => {
+          console.error('[youtubeChat] badge resolution error:', err.message);
+          onMessageCb({ ...base, badges: [] });
         });
-      }
     });
   } catch (err) {
     if (lastConnected !== false) {

@@ -37,6 +37,7 @@ logger = logging.getLogger("youtube-chat-sidecar")
 
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", "5006"))
+DEBUG_BADGES = os.environ.get("DEBUG_BADGES", "").strip().lower() == "true"
 
 SEARCH_POLL_SECONDS = 180  # how often to re-check for a live video while offline
 CHAT_BUFFER_MAX = 200
@@ -127,6 +128,47 @@ def ensure_chat_connection(channel_id):
     return video_id
 
 
+def author_badges(author):
+    """Turns pytchat's real per-author fields into unified badge objects.
+
+    pytchat's DefaultProcessor documents these author fields (see
+    https://github.com/taizan-hokuto/pytchat/wiki/DefaultProcessor):
+      - isChatOwner      (bool)          -> channel owner
+      - isChatModerator  (bool)          -> moderator
+      - isVerified       (bool)          -> YouTube-verified channel
+      - isChatSponsor    (bool)          -> channel member
+      - badgeUrl         (str)           -> REAL image URL for the member
+                                             badge specifically (the only
+                                             one of these YouTube exposes an
+                                             actual asset for via pytchat)
+
+    We only attach `icon` where pytchat gives us a real URL. Owner/
+    moderator/verified are real, but YouTube doesn't expose static badge
+    art for them through this library - so those badges carry accurate
+    id/name only, and the frontend skips rendering a badge with no icon
+    rather than faking one.
+    """
+    badges = []
+
+    if getattr(author, "isChatOwner", False):
+        badges.append({"id": "owner", "name": "Channel Owner"})
+    if getattr(author, "isChatModerator", False):
+        badges.append({"id": "moderator", "name": "Moderator"})
+    if getattr(author, "isVerified", False):
+        badges.append({"id": "verified", "name": "Verified"})
+    if getattr(author, "isChatSponsor", False):
+        badge = {"id": "member", "name": "Channel Member"}
+        badge_url = getattr(author, "badgeUrl", "") or ""
+        if badge_url:
+            badge["icon"] = badge_url
+        badges.append(badge)
+
+    if DEBUG_BADGES and badges:
+        logger.info("[youtube badges] %s -> %s", getattr(author, "name", "?"), badges)
+
+    return badges
+
+
 def drain_new_comments(channel_id):
     st = get_channel_state(channel_id)
     if st["chat"] is None:
@@ -138,7 +180,12 @@ def drain_new_comments(channel_id):
         data = st["chat"].get()
         items = data.sync_items() if hasattr(data, "sync_items") else data.items
         return [
-            {"author": c.author.name, "message": c.message, "timestamp": c.timestamp}
+            {
+                "author": c.author.name,
+                "message": c.message,
+                "timestamp": c.timestamp,
+                "badges": author_badges(c.author),
+            }
             for c in items
         ]
     except Exception as exc:

@@ -39,6 +39,7 @@ logger = logging.getLogger("tiktok-sidecar")
 
 TIKTOK_USERNAME = os.environ.get("TIKTOK_USERNAME", "").strip()
 PORT = int(os.environ.get("PORT", "5005"))
+DEBUG_BADGES = os.environ.get("DEBUG_BADGES", "").strip().lower() == "true"
 
 OFFLINE_POLL_SECONDS = 60
 RECONNECT_BACKOFF_SECONDS = 20
@@ -62,9 +63,9 @@ def set_state(live: bool, viewers: int = 0):
         state["viewers"] = viewers if live else 0
 
 
-def push_comment(nickname: str, comment: str):
+def push_comment(nickname: str, comment: str, badges=None):
     with chat_lock:
-        chat_buffer.append({"nickname": nickname, "comment": comment})
+        chat_buffer.append({"nickname": nickname, "comment": comment, "badges": badges or []})
         if len(chat_buffer) > CHAT_BUFFER_MAX:
             del chat_buffer[: len(chat_buffer) - CHAT_BUFFER_MAX]
 
@@ -74,6 +75,60 @@ def drain_comments():
         drained = list(chat_buffer)
         chat_buffer.clear()
         return drained
+
+
+def user_badges(user, host_unique_id):
+    """Turns TikTokLive.py's own documented per-user properties into unified
+    badge objects (see the library's ExtendedUser API docs:
+    https://isaackogan.github.io/TikTokLive/TikTokLive.proto.html):
+
+      - is_moderator     (bool)              -> moderator
+      - is_subscriber    (bool)              -> subscriber
+      - is_top_gifter    (bool)              -> top gifter
+      - verified         (bool)              -> TikTok-verified account
+      - subscriber_badge (BadgeStruct|None)  -> REAL image for the
+                                                 subscriber badge specifically
+                                                 (the only one of these
+                                                 TikTokLive exposes actual
+                                                 art for)
+
+    "Host" isn't one of TikTokLive's documented user properties, so instead
+    of guessing a field name we do a real, verifiable check: does this
+    commenter's unique_id match the channel we connected to?
+    """
+    badges = []
+
+    try:
+        if host_unique_id and getattr(user, "unique_id", None):
+            commenter_id = user.unique_id if user.unique_id.startswith("@") else f"@{user.unique_id}"
+            if commenter_id.lower() == host_unique_id.lower():
+                badges.append({"id": "host", "name": "Host"})
+    except Exception:
+        pass
+
+    if getattr(user, "is_moderator", False):
+        badges.append({"id": "moderator", "name": "Moderator"})
+
+    if getattr(user, "is_subscriber", False):
+        badge = {"id": "subscriber", "name": "Subscriber"}
+        try:
+            sub_badge = getattr(user, "subscriber_badge", None)
+            if sub_badge and sub_badge.image and sub_badge.image.url_list:
+                badge["icon"] = sub_badge.image.url_list[0]
+        except Exception:
+            pass
+        badges.append(badge)
+
+    if getattr(user, "verified", False):
+        badges.append({"id": "verified", "name": "Verified"})
+
+    if getattr(user, "is_top_gifter", False):
+        badges.append({"id": "top_gifter", "name": "Top Gifter"})
+
+    if DEBUG_BADGES and badges:
+        logger.info("[tiktok badges] %s -> %s", getattr(user, "nickname", "?"), badges)
+
+    return badges
 
 
 async def run_monitor_loop():
@@ -117,7 +172,8 @@ async def run_monitor_loop():
         async def on_comment(event: CommentEvent):
             try:
                 nickname = event.user.nickname if event.user else "unknown"
-                push_comment(nickname, event.comment or "")
+                badges = user_badges(event.user, unique_id) if event.user else []
+                push_comment(nickname, event.comment or "", badges)
             except Exception as exc:
                 logger.error("Error handling comment event: %s", exc)
 

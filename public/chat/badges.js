@@ -67,25 +67,20 @@
   // moved between messages, but the network fetch + decode only happens once).
   const iconCache = new Map();
 
-  function badgeIconUrl(platform, badgeId) {
-    return `/icons/badges/${platform}/${badgeId}.svg`;
-  }
-
-  function getCachedIcon(platform, badgeId) {
-    const key = `${platform}:${badgeId}`;
-    if (iconCache.has(key)) {
-      return iconCache.get(key).cloneNode(true);
+  function getCachedIcon(cacheKey, iconUrl) {
+    if (iconCache.has(cacheKey)) {
+      return iconCache.get(cacheKey).cloneNode(true);
     }
     const img = document.createElement('img');
     img.className = 'user-badge-icon';
-    img.src = badgeIconUrl(platform, badgeId);
+    img.src = iconUrl;
     img.loading = 'eager';
     img.decoding = 'async';
     img.onerror = function () {
-      // Missing/renamed asset - hide rather than show a broken-image icon.
+      // Missing/unreachable asset - hide rather than show a broken-image icon.
       img.style.display = 'none';
     };
-    iconCache.set(key, img);
+    iconCache.set(cacheKey, img);
     return img.cloneNode(true);
   }
 
@@ -97,22 +92,27 @@
 
   // Renders a message's badges array into a document fragment of
   // <span class="user-badge"><img>...</span> elements, preserving the order
-  // the platform sent them in.
+  // the platform sent them in. Each badge is expected to carry a real
+  // `icon` URL resolved server-side from the platform's own badge API
+  // (e.g. Twitch Helix Chat Badges) - badges with no resolvable icon are
+  // skipped rather than shown as a generic placeholder, since a fake badge
+  // is worse than no badge.
   function renderBadges(platform, badges) {
     const frag = document.createDocumentFragment();
     if (!Array.isArray(badges) || !badges.length) return frag;
 
     badges.forEach((badge) => {
-      if (!badge || !badge.id) return;
+      if (!badge || !badge.id || !badge.icon) return;
       const wrap = document.createElement('span');
       wrap.className = 'user-badge';
       wrap.title = badgeLabel(platform, badge);
-      wrap.appendChild(getCachedIcon(platform, badge.id));
+      const cacheKey = `${platform}:${badge.id}:${badge.version || '1'}`;
+      wrap.appendChild(getCachedIcon(cacheKey, badge.icon));
       frag.appendChild(wrap);
     });
 
     return frag;
   }
 
-  global.ChatBadges = { renderBadges, badgeIconUrl };
+  global.ChatBadges = { renderBadges };
 })(window);

@@ -5,6 +5,8 @@
 //
 // TIKTOK_SERVICE_URL - reused from the viewer-count config.
 
+const tiktokBadges = require('./badges/tiktokBadges');
+
 const TIKTOK_SERVICE_URL = (process.env.TIKTOK_SERVICE_URL || '').replace(/\/+$/, '');
 
 const POLL_INTERVAL_MS = 3000;
@@ -48,14 +50,21 @@ async function pollOnce() {
 
     const messages = Array.isArray(data.messages) ? data.messages : [];
     messages.forEach((m) => {
-      if (onMessageCb) {
-        onMessageCb({
-          username: m.nickname || m.username || 'unknown',
-          message: m.comment || m.message || '',
-          color: null,
-          timestamp: Math.floor(Date.now() / 1000),
+      if (!onMessageCb) return;
+      const base = {
+        username: m.nickname || m.username || 'unknown',
+        message: m.comment || m.message || '',
+        color: null,
+        timestamp: Math.floor(Date.now() / 1000),
+      };
+
+      tiktokBadges
+        .resolveBadges(m.badges)
+        .then((badges) => onMessageCb({ ...base, badges }))
+        .catch((err) => {
+          console.error('[tiktokChat] badge resolution error:', err.message);
+          onMessageCb({ ...base, badges: [] });
         });
-      }
     });
   } catch (err) {
     if (lastConnected !== false) {

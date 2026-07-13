@@ -98,6 +98,9 @@ class ChatManager extends EventEmitter {
       message: String(rawMessage.message || '').slice(0, 500),
       color: rawMessage.color || defaultColorFor(platform),
       timestamp: rawMessage.timestamp || Math.floor(Date.now() / 1000),
+      // Real badge metadata from the platform's own API/library. Always an
+      // array - empty when the platform doesn't expose badges or none apply.
+      badges: Array.isArray(rawMessage.badges) ? rawMessage.badges : [],
     };
 
     this.recentMessages.push(normalized);
