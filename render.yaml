@@ -31,10 +31,23 @@ services:
         sync: false
       - key: YOUTUBE_CHANNEL_ID
         sync: false
+      - key: YOUTUBE_CHAT_SERVICE_URL
+        sync: false
+      - key: KICK_CHATROOM_ID
+        sync: false
+      - key: KICK_PUSHER_APP_KEY
+        sync: false
+      - key: INSTAGRAM_USERNAME
+        sync: false
+      - key: INSTAGRAM_SESSION
+        sync: false
+      - key: INSTAGRAM_LIVE_COMMENTS_URL
+        sync: false
       - key: PORT
         value: 3000
 
   # TikTok LIVE sidecar (Python, TikTokLive.py + Flask)
+  # Handles BOTH viewer counts (/status) and chat (/chat).
   # Deploy this as its own Render web service, then copy its public URL
   # into the main service's TIKTOK_SERVICE_URL env var above.
   - type: web
@@ -48,3 +61,18 @@ services:
         sync: false
       - key: PORT
         value: 5005
+
+  # YouTube live chat sidecar (Python, pytchat + Flask)
+  # Deploy this as its own Render web service, then copy its public URL
+  # into the main service's YOUTUBE_CHAT_SERVICE_URL env var above.
+  - type: web
+    name: viewer-counter-youtube-chat
+    env: python
+    plan: free
+    buildCommand: pip install -r youtube-chat-service/requirements.txt
+    startCommand: python youtube-chat-service/app.py
+    envVars:
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: PORT
+        value: 5006

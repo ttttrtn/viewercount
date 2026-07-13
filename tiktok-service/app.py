@@ -32,7 +32,7 @@ import time
 from flask import Flask, jsonify
 
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import DisconnectEvent, LiveEndEvent
+from TikTokLive.events import CommentEvent, DisconnectEvent, LiveEndEvent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tiktok-sidecar")
@@ -42,16 +42,38 @@ PORT = int(os.environ.get("PORT", "5005"))
 
 OFFLINE_POLL_SECONDS = 30
 RECONNECT_BACKOFF_SECONDS = 15
+CHAT_BUFFER_MAX = 200
 
 # Shared state between the asyncio background thread and the Flask routes.
 state_lock = threading.Lock()
 state = {"live": False, "viewers": 0}
+
+# Chat comments buffered since the last time GET /chat was polled. Node
+# polls this endpoint every ~1.5s and drains the buffer each time, so the
+# same overlay-facing normalization/dedup logic used for the other
+# platforms lives on the Node side; this sidecar just forwards raw events.
+chat_lock = threading.Lock()
+chat_buffer = []
 
 
 def set_state(live: bool, viewers: int = 0):
     with state_lock:
         state["live"] = live
         state["viewers"] = viewers if live else 0
+
+
+def push_comment(nickname: str, comment: str):
+    with chat_lock:
+        chat_buffer.append({"nickname": nickname, "comment": comment})
+        if len(chat_buffer) > CHAT_BUFFER_MAX:
+            del chat_buffer[: len(chat_buffer) - CHAT_BUFFER_MAX]
+
+
+def drain_comments():
+    with chat_lock:
+        drained = list(chat_buffer)
+        chat_buffer.clear()
+        return drained
 
 
 async def run_monitor_loop():
@@ -90,6 +112,14 @@ async def run_monitor_loop():
         async def on_live_end(_event):
             logger.info("%s's livestream ended.", unique_id)
             set_state(False)
+
+        @client.on(CommentEvent)
+        async def on_comment(event: CommentEvent):
+            try:
+                nickname = event.user.nickname if event.user else "unknown"
+                push_comment(nickname, event.comment or "")
+            except Exception as exc:
+                logger.error("Error handling comment event: %s", exc)
 
         try:
             await client.start(fetch_room_info_on_connect=True)
@@ -138,6 +168,13 @@ app = Flask(__name__)
 def status():
     with state_lock:
         return jsonify({"live": state["live"], "viewers": state["viewers"]})
+
+
+@app.route("/chat")
+def chat():
+    with state_lock:
+        live = state["live"]
+    return jsonify({"live": live, "messages": drain_comments()})
 
 
 @app.route("/health")

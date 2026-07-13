@@ -1,0 +1,117 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+
+.chat-feed {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  width: min(420px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+  /* fade the very top of the stack so old messages don't hard-cut */
+  mask-image: linear-gradient(to bottom, transparent 0%, black 8%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, black 8%);
+}
+
+.chat-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(18, 18, 24, 0.62);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  font-size: 15px;
+  line-height: 1.35;
+  color: #f2f2f5;
+  word-break: break-word;
+  opacity: 0;
+  transform: translateY(14px) scale(0.98);
+  animation: message-in 320ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+.chat-message.leaving {
+  animation: message-out 260ms ease-in forwards;
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes message-out {
+  from {
+    opacity: 1;
+    max-height: 200px;
+    margin-top: 0;
+  }
+  to {
+    opacity: 0;
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    margin-top: -6px;
+  }
+}
+
+.platform-badge {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.platform-badge img {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.message-body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.username {
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.timestamp {
+  font-size: 11px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.45);
+  margin-left: 6px;
+}
+
+.text {
+  color: #f2f2f5;
+}

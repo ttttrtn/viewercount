@@ -284,3 +284,103 @@ simply always report false, and the icon stays hidden.
   overlay running 24/7.
 - The frontend uses requestAnimationFrame for animations and cleans up
   properly - no lingering timers beyond the 5-second poll.
+
+---
+
+## Multi-Platform Chat Widget
+
+A second, independent OBS Browser Source that combines live chat from
+all six platforms into one animated feed:
+
+```
+https://your-render-app.onrender.com/chat
+```
+
+```
+🟣 User123: Hello!
+🟢 Player: W stream
+▶️ Viewer: Nice!
+🎵 Fan: 🔥
+📸 Follower: Hi
+```
+
+Transparent background, no scrollbars, smooth enter/exit animation per
+message, platform SVG badges, per-platform username colors, and a
+configurable rolling max message count - old messages animate out as new
+ones arrive rather than the widget growing forever.
+
+**Query string options** (append to the `/chat` browser-source URL):
+
+| Param        | Example                    | Effect                                             |
+|--------------|-----------------------------|-----------------------------------------------------|
+| `max`        | `/chat?max=25`               | Max messages kept on screen at once (default 40)     |
+| `timestamps` | `/chat?timestamps=true`      | Show a HH:MM timestamp on each message                |
+| `platforms`  | `/chat?platforms=twitch,kick`| Only show chat from the listed platforms               |
+
+### How each platform is read
+
+| Platform  | Transport | Notes |
+|-----------|-----------|-------|
+| Twitch    | Twitch IRC over WebSocket, anonymous `justinfan` login | No OAuth needed just to read chat; reuses `TWITCH_USERNAME`. |
+| Kick      | Kick's Pusher WebSocket (the same one kick.com's own frontend uses) | No official chat API exists; chatroom id is auto-resolved from Kick's public channel endpoint, with `KICK_CHATROOM_ID` as a manual override if that lookup gets blocked. |
+| YouTube   | `pytchat` inside `youtube-chat-service` (Python sidecar) | Avoids the costly `liveChatMessages.list` polling quota; the sidecar resolves the current live video id via a cheap, infrequent `search.list` call. |
+| Rumble    | Rumble's official Live Stream API (same URL as the viewer-count service) | Chat/rants are included directly in that response; polled and de-duplicated by message id. |
+| TikTok    | `TikTokLive.py` inside the existing `tiktok-service` sidecar | The same sidecar used for viewer counts now also buffers `CommentEvent`s at `GET /chat`. |
+| Instagram | Config-driven bridge (`INSTAGRAM_LIVE_COMMENTS_URL`) | Instagram has no official Live-comments API and no reliable unofficial one that doesn't require an undocumented, frequently-breaking private endpoint. Rather than hardcode one, this integration stays isolated and idle until you point it at a JSON bridge you control - see `services/chat/instagramChat.js`. |
+
+### New/changed project structure
+
+```
+viewer-counter/
+├── services/
+│   └── chat/
+│       ├── chatManager.js       # aggregates all platforms, broadcasts via EventEmitter
+│       ├── twitchChat.js
+│       ├── kickChat.js
+│       ├── youtubeChat.js       # polls youtube-chat-service
+│       ├── rumbleChat.js
+│       ├── tiktokChat.js        # polls tiktok-service's new /chat endpoint
+│       └── instagramChat.js
+├── youtube-chat-service/        # NEW Python sidecar (pytchat)
+│   ├── app.py
+│   └── requirements.txt
+├── tiktok-service/
+│   └── app.py                   # extended: now also buffers comments at /chat
+└── public/
+    └── chat/                    # NEW browser source
+        ├── index.html
+        ├── style.css
+        └── script.js
+```
+
+### Deployment
+
+The chat widget adds one more Render service beyond what the viewer
+counter already needed:
+
+1. **Main service** (`viewer-counter`) - unchanged deploy steps, now also
+   serves `/chat` and hosts the Socket.IO server. Set the new chat env
+   vars listed in `.env.example`.
+2. **TikTok sidecar** (`viewer-counter-tiktok`) - same deploy as before;
+   no new steps, it now serves both `/status` and `/chat`.
+3. **YouTube chat sidecar** (`viewer-counter-youtube-chat`) - **new**.
+   Deploy `youtube-chat-service/` as its own Render web service
+   (`render.yaml` already defines it), set `YOUTUBE_API_KEY`, then copy
+   its public URL into the main service's `YOUTUBE_CHAT_SERVICE_URL`.
+
+Kick, Rumble, and Twitch chat need no additional services - they reuse
+the existing env vars and run entirely inside the main Node process.
+
+### Reliability
+
+- Every platform module reconnects automatically with exponential
+  backoff (WebSocket transports) or a fixed poll interval with backoff
+  on failure (HTTP-polled transports), and never throws past its own
+  boundary - one platform failing never takes down the others.
+- `chatManager` keeps a small ring buffer of the most recent messages so
+  a browser source that reloads mid-stream (e.g. OBS refresh) isn't
+  greeted with a blank widget.
+- Platforms with missing configuration are skipped at startup with a
+  clear log line rather than retrying forever.
+- Graceful shutdown (`SIGTERM`/`SIGINT`) stops every chat connection
+  cleanly before the process exits.
