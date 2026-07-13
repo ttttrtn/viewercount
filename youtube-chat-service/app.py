@@ -38,7 +38,7 @@ logger = logging.getLogger("youtube-chat-sidecar")
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", "5006"))
 
-SEARCH_POLL_SECONDS = 120  # how often to re-check for a live video while offline
+SEARCH_POLL_SECONDS = 180  # how often to re-check for a live video while offline
 CHAT_BUFFER_MAX = 200
 
 # Per-channel state: { channel_id: {"video_id": str|None, "chat": pytchat.LiveChat|None,

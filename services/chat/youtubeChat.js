@@ -11,7 +11,7 @@
 const YOUTUBE_CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || '';
 const YOUTUBE_CHAT_SERVICE_URL = (process.env.YOUTUBE_CHAT_SERVICE_URL || '').replace(/\/+$/, '');
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MS = 4000;
 const FETCH_TIMEOUT_MS = 4000;
 
 let pollTimer = null;

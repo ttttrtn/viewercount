@@ -40,8 +40,8 @@ logger = logging.getLogger("tiktok-sidecar")
 TIKTOK_USERNAME = os.environ.get("TIKTOK_USERNAME", "").strip()
 PORT = int(os.environ.get("PORT", "5005"))
 
-OFFLINE_POLL_SECONDS = 30
-RECONNECT_BACKOFF_SECONDS = 15
+OFFLINE_POLL_SECONDS = 60
+RECONNECT_BACKOFF_SECONDS = 20
 CHAT_BUFFER_MAX = 200
 
 # Shared state between the asyncio background thread and the Flask routes.
@@ -141,7 +141,7 @@ async def run_monitor_loop():
                 except Exception as inner_exc:
                     logger.error("Error reading room_info: %s", inner_exc)
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(10)
 
         except Exception as exc:
             logger.error("Connection error for %s: %s", unique_id, exc)

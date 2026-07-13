@@ -384,3 +384,40 @@ the existing env vars and run entirely inside the main Node process.
   clear log line rather than retrying forever.
 - Graceful shutdown (`SIGTERM`/`SIGINT`) stops every chat connection
   cleanly before the process exits.
+
+### Low CPU tuning
+
+Both overlays are tuned to stay cheap in OBS's Browser Source (CEF),
+which is often software-rendered and where a couple of specific CSS
+properties are disproportionately expensive:
+
+- **No `backdrop-filter: blur()`** anywhere. It's one of the few CSS
+  properties that forces a full recomposite of everything behind it on
+  basically every frame - removing it is the single biggest CPU win for
+  a semi-transparent OBS overlay. Panels use a slightly more opaque flat
+  color instead, which looks nearly identical at typical overlay sizes.
+- **No CSS `mask-image` gradients or `scale()` transforms** in the chat
+  feed animation - both also force extra compositor layers. Messages now
+  animate with a plain opacity + `translateY` fade, which GPUs (and
+  CEF's software fallback) handle far more cheaply.
+- **requestAnimationFrame loops only run while a value is actively
+  animating** (see `public/script.js`) - nothing polls or redraws on an
+  idle timer.
+
+Backend polling intervals were also widened - fast enough that chat
+still feels live, slow enough not to burn unnecessary CPU/requests on
+Render's shared free-tier resources:
+
+| Source | Interval |
+|---|---|
+| Rumble chat poll | 15s (was 8s) |
+| YouTube chat poll (Node → sidecar) | 4s (was 2s) |
+| TikTok chat poll (Node → sidecar) | 3s (was 1.5s) |
+| Instagram bridge poll | 5s (was 3s) |
+| TikTok sidecar: viewer-count refresh while live | 10s (was 5s) |
+| TikTok sidecar: offline `is_live()` check | 60s (was 30s) |
+| YouTube sidecar: re-search for a live video | 180s (was 120s) |
+
+Twitch and Kick are WebSocket push transports, not polling, so they were
+already effectively idle CPU-wise between messages - no changes needed
+there.

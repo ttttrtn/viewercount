@@ -14,7 +14,7 @@ const RUMBLE_API_URL = process.env.RUMBLE_API_URL || '';
 const RUMBLE_API_KEY = process.env.RUMBLE_API_KEY || '';
 const RUMBLE_CHANNEL = process.env.RUMBLE_CHANNEL || '';
 
-const POLL_INTERVAL_MS = 8000;
+const POLL_INTERVAL_MS = 15000;
 const MAX_BACKOFF_MS = 2 * 60 * 1000;
 const SEEN_ID_CACHE_SIZE = 300;
 

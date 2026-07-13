@@ -7,7 +7,7 @@
 
 const TIKTOK_SERVICE_URL = (process.env.TIKTOK_SERVICE_URL || '').replace(/\/+$/, '');
 
-const POLL_INTERVAL_MS = 1500;
+const POLL_INTERVAL_MS = 3000;
 const FETCH_TIMEOUT_MS = 4000;
 
 let pollTimer = null;
