@@ -3,7 +3,15 @@
 
   const params = new URLSearchParams(window.location.search);
   const MAX_MESSAGES = Math.max(1, parseInt(params.get('max'), 10) || 40);
-  const SHOW_TIMESTAMPS = params.get('timestamps') === 'true';
+
+  // Config: query-string overrides a default, same pattern as MAX_MESSAGES above.
+  let SHOW_TIMESTAMPS = false;
+  let SHOW_USER_BADGES = true;
+  let SHOW_USERNAME_COLORS = true;
+  if (params.has('timestamps')) SHOW_TIMESTAMPS = params.get('timestamps') === 'true';
+  if (params.has('badges')) SHOW_USER_BADGES = params.get('badges') !== 'false';
+  if (params.has('usernameColors')) SHOW_USERNAME_COLORS = params.get('usernameColors') !== 'false';
+
   const platformFilter = (params.get('platforms') || '')
     .split(',')
     .map((p) => p.trim().toLowerCase())
@@ -52,14 +60,26 @@
 
     const usernameEl = document.createElement('span');
     usernameEl.className = 'username';
-    usernameEl.style.color = msg.color || '#ffffff';
+    usernameEl.style.color = SHOW_USERNAME_COLORS ? (msg.color || '#ffffff') : '#ffffff';
     usernameEl.textContent = msg.username;
+
+    body.appendChild(usernameEl);
+
+    if (SHOW_USER_BADGES && window.ChatBadges) {
+      const badgesEl = document.createElement('span');
+      badgesEl.className = 'user-badges';
+      badgesEl.appendChild(window.ChatBadges.renderBadges(msg.platform, msg.badges));
+      body.appendChild(badgesEl);
+    }
+
+    const colonEl = document.createElement('span');
+    colonEl.className = 'colon';
+    colonEl.textContent = ': ';
+    body.appendChild(colonEl);
 
     const textEl = document.createElement('span');
     textEl.className = 'text';
     textEl.textContent = msg.message;
-
-    body.appendChild(usernameEl);
     body.appendChild(textEl);
 
     if (SHOW_TIMESTAMPS && msg.timestamp) {
