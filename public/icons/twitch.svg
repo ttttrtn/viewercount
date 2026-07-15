@@ -1,4 +1,40 @@
-<svg role="img" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="24" height="24">
-  <title>Twitch</title>
-  <path fill="#9146FF" d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Purple diagonal -->
+  <path fill="#9146FF" d="
+    M80 0
+    L512 0
+    L512 432
+    L432 512
+    L236 512
+    L0 276
+    L0 80
+    Z"/>
+
+  <!-- White chat bubble -->
+  <path fill="#FFFFFF" d="
+    M128 64
+    H448
+    V352
+    L384 416
+    H286
+    L220 482
+    V416
+    H128
+    Z"/>
+
+  <!-- Left eye -->
+  <rect
+    x="245"
+    y="146"
+    width="44"
+    height="132"
+    fill="#9146FF"/>
+
+  <!-- Right eye -->
+  <rect
+    x="363"
+    y="146"
+    width="44"
+    height="132"
+    fill="#9146FF"/>
 </svg>
