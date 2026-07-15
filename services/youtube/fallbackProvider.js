@@ -10,7 +10,18 @@
 // { live, viewers, videoId } shape as officialProvider.js.
 const log = require("./logger");
 const { config } = require("./config");
-const { Innertube } = require("youtubei.js");
+const { Innertube, Log } = require("youtubei.js");
+
+// Quiet youtubei.js's internal debug/warn noise (e.g. "Unable to find
+// matching run for attachment run" when it parses unrelated search
+// results' rich text). Real failures still surface via thrown errors,
+// which we catch and log ourselves below.
+try {
+    Log.setLevel(Log.Level.ERROR);
+} catch (e) {
+    // Older/newer youtubei.js versions may not expose Log the same way -
+    // non-fatal, just means we won't be able to suppress its own logging.
+}
 
 const DEFAULT_TIMEOUT_MS = config?.fallbackTimeoutMs ?? 8000;
 
@@ -74,7 +85,7 @@ function parseNumber(text) {
 
 // The concurrent "watching now" count lives in primary_info.view_count for
 // live videos - basic_info.view_count is usually the cumulative view count
-// and will be wrong (often much larger or smaller) for a live stream.
+// and will be wrong for a live stream.
 function extractConcurrentViewers(info) {
     const liveViewText =
         info?.primary_info?.view_count?.view_count?.text ??
@@ -85,7 +96,6 @@ function extractConcurrentViewers(info) {
     const parsed = parseNumber(liveViewText);
     if (parsed !== null) return parsed;
 
-    // Last resort - not accurate for live streams, but better than nothing.
     log.warn(
         "Falling back to basic_info.view_count for concurrent viewers - " +
             "this is likely the cumulative view count, not live viewers."
@@ -118,7 +128,7 @@ async function withApi(fn, label) {
     }
 }
 
-async function buildResult(info, fallbackVideoId) {
+function buildResult(info, fallbackVideoId) {
     return {
         live: true,
         viewers: extractConcurrentViewers(info),
@@ -161,6 +171,19 @@ async function findLiveFromChannel(channel) {
     return null;
 }
 
+// Try to resolve a human-readable channel name/title, needed to make
+// Method 3's search query meaningful. Returns null if nothing usable was
+// found (in which case the caller should skip Method 3 entirely, rather
+// than searching on a raw channel ID, which returns irrelevant results).
+function resolveChannelName(channel) {
+    return (
+        channel?.metadata?.title ??
+        channel?.header?.title?.text ??
+        channel?.header?.author?.name ??
+        null
+    );
+}
+
 async function checkFallback({ channelId, videoId }) {
     // Method 1: known video ID
     if (videoId) {
@@ -179,12 +202,15 @@ async function checkFallback({ channelId, videoId }) {
 
     // Method 2: channel's own live tab
     let channel;
+    let channelName = null;
     if (channelId) {
         try {
             channel = await withApi(
                 api => api.getChannel(channelId),
                 `getChannel(${channelId})`
             );
+            channelName = resolveChannelName(channel);
+
             const live = await findLiveFromChannel(channel);
             if (live) {
                 const info = await withApi(
@@ -200,29 +226,24 @@ async function checkFallback({ channelId, videoId }) {
         }
     }
 
-    // Method 3: search - use the channel's name as the query text (a raw
-    // channel ID is not a meaningful search term), then filter results to
-    // videos actually authored by that channel.
-    if (channelId) {
+    // Method 3: search by the channel's resolved name, filtered to videos
+    // actually authored by that channel. Skipped entirely if we have no
+    // name to search on - searching for a raw channel ID returns noisy,
+    // irrelevant results and isn't a meaningful query.
+    if (channelId && channelName) {
         try {
-            const channelName =
-                channel?.metadata?.title ?? channel?.header?.title?.text;
-            const query = channelName ?? channelId;
-
             const search = await withApi(
-                api => api.search(query, { type: "video" }),
-                `search(${query})`
+                api => api.search(channelName, { type: "video" }),
+                `search(${channelName})`
             );
 
-            const candidates = (search?.results ?? []).filter(
+            const live = (search?.results ?? []).find(
                 v =>
                     v.is_live &&
                     (v.author?.id === channelId ||
-                        v.author?.channel_id === channelId ||
-                        !channelName) // if we had no name to filter by, trust is_live alone
+                        v.author?.channel_id === channelId)
             );
 
-            const live = candidates[0];
             if (live) {
                 const info = await withApi(
                     api => api.getInfo(live.id),
@@ -235,6 +256,11 @@ async function checkFallback({ channelId, videoId }) {
         } catch (e) {
             log.warn(e);
         }
+    } else if (channelId) {
+        log.warn(
+            `Skipping Method 3 (search) for channel ${channelId} - no ` +
+                `channel name could be resolved to search on.`
+        );
     }
 
     return {
