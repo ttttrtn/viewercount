@@ -4,23 +4,6 @@ TikTok LIVE sidecar service.
 Wraps TikTokLive.py (isaackogan/TikTokLive) - the current, actively
 maintained Python library for connecting to TikTok LIVE - and exposes a
 tiny HTTP API that the main Node.js overlay server polls.
-
-Endpoints:
-    GET /status  -> {"live": bool, "viewers": int}
-    GET /health  -> {"ok": true}   (simple liveness check for Render)
-
-Design:
-    - While offline, calls TikTokLiveClient.is_live() on a slow interval
-      (OFFLINE_POLL_SECONDS). is_live() does not open a websocket, so it's
-      cheap and safe to call repeatedly.
-    - Once live, connects via client.start(fetch_room_info=True)
-      in the background and listens for viewer-count and disconnect
-      events, updating in-memory state as they arrive.
-    - On disconnect/stream end, or any unexpected exception in the
-      connection loop, the background task logs the error, waits a short
-      backoff period, and returns to the offline polling loop - so the
-      service recovers automatically from network blips without needing
-      to be restarted.
 """
 
 import asyncio
@@ -32,7 +15,13 @@ import time
 from flask import Flask, jsonify
 
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import CommentEvent, DisconnectEvent, LiveEndEvent
+from TikTokLive.events import (
+    CommentEvent, 
+    ConnectEvent, 
+    DisconnectEvent, 
+    LiveEndEvent, 
+    RoomUserSeqEvent
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tiktok-sidecar")
@@ -49,18 +38,18 @@ CHAT_BUFFER_MAX = 200
 state_lock = threading.Lock()
 state = {"live": False, "viewers": 0}
 
-# Chat comments buffered since the last time GET /chat was polled. Node
-# polls this endpoint every ~1.5s and drains the buffer each time, so the
-# same overlay-facing normalization/dedup logic used for the other
-# platforms lives on the Node side; this sidecar just forwards raw events.
+# Chat comments buffered since the last time GET /chat was polled.
 chat_lock = threading.Lock()
 chat_buffer = []
 
 
-def set_state(live: bool, viewers: int = 0):
+def set_state(live: bool, viewers: int = None):
     with state_lock:
         state["live"] = live
-        state["viewers"] = viewers if live else 0
+        if viewers is not None:
+            state["viewers"] = viewers
+        elif not live:
+            state["viewers"] = 0
 
 
 def push_comment(nickname: str, comment: str, badges=None):
@@ -78,24 +67,6 @@ def drain_comments():
 
 
 def user_badges(user, host_unique_id):
-    """Turns TikTokLive.py's own documented per-user properties into unified
-    badge objects (see the library's ExtendedUser API docs:
-    https://isaackogan.github.io/TikTokLive/TikTokLive.proto.html):
-
-      - is_moderator     (bool)              -> moderator
-      - is_subscriber    (bool)              -> subscriber
-      - is_top_gifter    (bool)              -> top gifter
-      - verified         (bool)              -> TikTok-verified account
-      - subscriber_badge (BadgeStruct|None)  -> REAL image for the
-                                                 subscriber badge specifically
-                                                 (the only one of these
-                                                 TikTokLive exposes actual
-                                                 art for)
-
-    "Host" isn't one of TikTokLive's documented user properties, so instead
-    of guessing a field name we do a real, verifiable check: does this
-    commenter's unique_id match the channel we connected to?
-    """
     badges = []
 
     try:
@@ -125,9 +96,6 @@ def user_badges(user, host_unique_id):
     if getattr(user, "is_top_gifter", False):
         badges.append({"id": "top_gifter", "name": "Top Gifter"})
 
-    if DEBUG_BADGES and badges:
-        logger.info("[tiktok badges] %s -> %s", getattr(user, "nickname", "?"), badges)
-
     return badges
 
 
@@ -144,7 +112,7 @@ async def run_monitor_loop():
 
         try:
             is_live = await client.is_live()
-        except Exception as exc:  # network hiccup, TikTok rate limit, etc.
+        except Exception as exc:  
             logger.error("is_live() check failed: %s", exc)
             set_state(False)
             await asyncio.sleep(RECONNECT_BACKOFF_SECONDS)
@@ -155,9 +123,22 @@ async def run_monitor_loop():
             await asyncio.sleep(OFFLINE_POLL_SECONDS)
             continue
 
-        logger.info("%s is LIVE - connecting to read viewer count.", unique_id)
+        logger.info("%s is LIVE - attempting to connect...", unique_id)
 
-        # Register event handlers fresh for each connection.
+        # --- EVENT LISTENERS ---
+        
+        @client.on(ConnectEvent)
+        async def on_connect(_event):
+            logger.info("Successfully connected to %s!", unique_id)
+            # Immediately update status to true the second the websocket connects
+            set_state(True)
+
+        @client.on(RoomUserSeqEvent)
+        async def on_viewer_count(event):
+            # TikTok natively pushes viewer count updates via this event
+            viewers = getattr(event, "viewer_count", getattr(event, "total_user", 0))
+            set_state(True, int(viewers))
+
         @client.on(DisconnectEvent)
         async def on_disconnect(_event):
             logger.info("Disconnected from %s.", unique_id)
@@ -177,55 +158,14 @@ async def run_monitor_loop():
             except Exception as exc:
                 logger.error("Error handling comment event: %s", exc)
 
-        # Run room status updates concurrently in the background so it doesn't
-        # block or get blocked by client.start()
-        async def poll_room_info():
-            while not client.connected:
-                await asyncio.sleep(0.5)
-
-            while client.connected:
-                try:
-                    room_info = client.room_info or {}
-                    
-                    # Robust parsing for both dict-like and object-like properties
-                    if isinstance(room_info, dict):
-                        stats = room_info.get("stats") or room_info.get("liveRoomStats") or {}
-                    else:
-                        stats = getattr(room_info, "stats", None) or getattr(room_info, "liveRoomStats", {})
-                    
-                    if isinstance(stats, dict):
-                        viewers = (
-                            stats.get("userCount")
-                            or stats.get("user_count")
-                            or stats.get("viewerCount")
-                            or 0
-                        )
-                    else:
-                        viewers = (
-                            getattr(stats, "user_count", None)
-                            or getattr(stats, "viewer_count", None)
-                            or 0
-                        )
-                        
-                    set_state(True, int(viewers))
-                except Exception as inner_exc:
-                    logger.error("Error reading room_info: %s", inner_exc)
-
-                await asyncio.sleep(10)
-
-        poll_task = None
+        # --- CONNECTION START ---
         try:
-            poll_task = asyncio.create_task(poll_room_info())
-            
-            # Corrected the deprecated parameter from fetch_room_info_on_connect -> fetch_room_info
-            await client.start(fetch_room_info=True)
-
+            # In TikTokLive v6, start() takes NO keyword arguments.
+            await client.start()
         except Exception as exc:
             logger.error("Connection error for %s: %s", unique_id, exc)
         finally:
             set_state(False)
-            if poll_task and not poll_task.done():
-                poll_task.cancel()
             try:
                 await client.disconnect()
             except Exception:
