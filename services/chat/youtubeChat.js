@@ -1,9 +1,5 @@
 //
-// YouTube Live Chat via youtubei.js
-// Compatible with youtubei.js 17.2+
-//
-// ENV:
-// YOUTUBE_VIDEO_ID=current live video ID
+// YouTube Live Chat via youtubei.js 17.2+
 //
 
 const { Innertube } = require("youtubei.js");
@@ -16,6 +12,7 @@ const YOUTUBE_VIDEO_ID =
 
 
 let liveChat = null;
+
 let stopped = false;
 
 let onMessageCb = null;
@@ -29,6 +26,7 @@ const seenMessages = new Set();
 function isConfigured() {
     return Boolean(YOUTUBE_VIDEO_ID);
 }
+
 
 
 
@@ -50,11 +48,14 @@ async function start(onMessage, onStatus) {
     }
 
 
+
     try {
+
 
         console.log(
             `[youtubeChat] Connecting ${YOUTUBE_VIDEO_ID}`
         );
+
 
 
         const youtube =
@@ -62,28 +63,46 @@ async function start(onMessage, onStatus) {
 
 
 
-        // Avoid getInfo parser crashes
-        const basic =
-            await youtube.getBasicInfo(
-                YOUTUBE_VIDEO_ID
+        let info;
+
+
+        try {
+
+            info =
+                await youtube.getInfo(
+                    YOUTUBE_VIDEO_ID
+                );
+
+
+        } catch(err) {
+
+
+            console.error(
+                "[youtubeChat] getInfo failed:",
+                err.message
             );
+
+
+            return;
+
+        }
+
 
 
         console.log(
             "[youtubeChat] Video:",
-            basic.basic_info?.title || "Unknown"
+            info.basic_info?.title || "Unknown"
         );
 
 
 
         liveChat =
-            await youtube.getLiveChat(
-                YOUTUBE_VIDEO_ID
-            );
+            await info.getLiveChat();
 
 
 
         if (!liveChat) {
+
 
             console.error(
                 "[youtubeChat] No live chat found"
@@ -99,6 +118,7 @@ async function start(onMessage, onStatus) {
 
 
             return;
+
         }
 
 
@@ -155,14 +175,18 @@ async function start(onMessage, onStatus) {
 
                 if (!stopped) {
 
+
                     setTimeout(()=>{
+
 
                         start(
                             onMessageCb,
                             onStatusCb
                         );
 
+
                     },5000);
+
 
                 }
 
@@ -183,11 +207,9 @@ async function start(onMessage, onStatus) {
 
                 for (const action of data.actions) {
 
-
                     await parseAction(
                         action
                     );
-
 
                 }
 
@@ -227,6 +249,7 @@ async function start(onMessage, onStatus) {
     }
 
 }
+
 
 
 
@@ -288,8 +311,10 @@ async function parseAction(action) {
                 if (x.text)
                     return x.text;
 
+
                 if (x.emoji)
                     return "😀";
+
 
                 return "";
 
@@ -334,7 +359,9 @@ async function parseAction(action) {
     let badges = [];
 
 
+
     try {
+
 
         badges =
             await youtubeBadges.resolveBadges(
@@ -354,6 +381,7 @@ async function parseAction(action) {
 
 
 
+
     onMessageCb?.({
 
         username,
@@ -364,10 +392,12 @@ async function parseAction(action) {
 
         color:null,
 
+
         timestamp:
             Math.floor(
-                Date.now()/1000
+                Date.now() / 1000
             ),
+
 
 
         type:
@@ -376,14 +406,17 @@ async function parseAction(action) {
                 : "message",
 
 
+
         amount:
             renderer.purchaseAmountText
                 ?.simpleText || null
+
 
     });
 
 
 }
+
 
 
 
@@ -395,7 +428,9 @@ function stop() {
     stopped = true;
 
 
+
     if (liveChat) {
+
 
         try {
 
@@ -403,14 +438,19 @@ function stop() {
 
         } catch(e){}
 
+
     }
+
 
 
     liveChat = null;
 
+
     seenMessages.clear();
 
+
 }
+
 
 
 
