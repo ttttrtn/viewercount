@@ -617,3 +617,25 @@ module.exports = {
     debugEvents
 
 };
+liveChat.on("error", (err)=>{
+
+    console.error(
+        "[youtubeChat]",
+        err.message
+    );
+
+    if(
+        err.message.includes(
+            "get_live_chat_replay"
+        )
+    ){
+
+        stopped = true;
+
+        try {
+            liveChat.stop();
+        } catch(e){}
+
+    }
+
+});
