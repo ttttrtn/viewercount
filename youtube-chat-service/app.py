@@ -1,7 +1,5 @@
 import os
 import threading
-import time
-
 from flask import Flask, jsonify, request
 from chat_downloader import ChatDownloader
 
@@ -10,54 +8,56 @@ app = Flask(__name__)
 PORT = int(os.environ.get("PORT", "10000"))
 CHAT_BUFFER_MAX = 200
 
-buffer = []
-buffer_lock = threading.Lock()
+buffers = {}
+threads = {}
 
-streams = {}
+lock = threading.Lock()
 
 
-class StreamReader:
+def start_chat(video_id):
 
-    def __init__(self, video_url):
-        self.video_url = video_url
-        self.messages = []
-        self.running = True
+    if video_id in threads:
+        return
 
-        self.thread = threading.Thread(
-            target=self.worker,
-            daemon=True
-        )
-        self.thread.start()
+    def worker():
 
-    def worker(self):
+        print("Starting chat:", video_id)
 
-        while self.running:
+        try:
+            downloader = ChatDownloader()
 
-            try:
+            chat = downloader.get_chat(
+                f"https://www.youtube.com/watch?v={video_id}"
+            )
 
-                chat = ChatDownloader().get_chat(
-                    self.video_url
-                )
+            for message in chat:
 
-                for msg in chat:
+                item = {
+                    "id": message.get("message_id"),
+                    "author": message.get("author", {}).get("name", "Unknown"),
+                    "message": message.get("message", ""),
+                    "timestamp": message.get("timestamp")
+                }
 
-                    message = {
-                        "platform": "youtube",
-                        "id": msg.get("message_id"),
-                        "author": msg.get("author", {}).get("name", "Unknown"),
-                        "message": msg.get("message", ""),
-                        "timestamp": msg.get("timestamp")
-                    }
+                print("NEW MESSAGE:", item)
 
-                    with buffer_lock:
-                        self.messages.append(message)
-                        self.messages = self.messages[-CHAT_BUFFER_MAX:]
+                with lock:
+                    buffers[video_id].append(item)
+                    buffers[video_id] = buffers[video_id][-CHAT_BUFFER_MAX:]
 
-            except Exception as e:
+        except Exception as e:
+            print("CHAT ERROR:", e)
 
-                print("Chat error:", e)
 
-                time.sleep(5)
+    buffers[video_id] = []
+
+    t = threading.Thread(
+        target=worker,
+        daemon=True
+    )
+
+    threads[video_id] = t
+    t.start()
 
 
 @app.route("/chat")
@@ -68,34 +68,34 @@ def chat():
     if not video_id:
         return jsonify({
             "live": False,
-            "error": "Missing video_id"
+            "messages": []
         })
 
-    url = f"https://www.youtube.com/watch?v={video_id}"
 
-    if video_id not in streams:
+    if video_id not in threads:
+        start_chat(video_id)
 
-        print("Starting reader:", video_id)
 
-        streams[video_id] = StreamReader(url)
+    with lock:
+        msgs = buffers.get(video_id, [])
+
 
     return jsonify({
         "live": True,
-        "messages": streams[video_id].messages
+        "video_id": video_id,
+        "messages": msgs
     })
 
 
 @app.route("/health")
 def health():
-
     return jsonify({
         "status": "ok"
     })
 
 
 @app.route("/")
-def root():
-
+def home():
     return jsonify({
         "service": "youtube-chat",
         "status": "running"
@@ -103,7 +103,6 @@ def root():
 
 
 if __name__ == "__main__":
-
     app.run(
         host="0.0.0.0",
         port=PORT
