@@ -123,12 +123,9 @@ async function start(onMessage, onStatus) {
         debugLog("Live chat handle acquired, starting listener.");
         onStatusCb?.({ connected: true, live: true });
 
-        liveChat.on("chat-update", (data) => {
-            debugLog(`chat-update received, actions: ${data?.actions?.length ?? 0}`);
-            if (data?.actions) {
-                lastMessageTime = Date.now();
-                for (const action of data.actions) parseAction(action);
-            }
+        liveChat.on("chat-update", (action) => {
+            lastMessageTime = Date.now();
+            handleChatUpdate(action);
         });
 
         liveChat.on("end", () => {
@@ -159,28 +156,73 @@ function resetWatchdog() {
     }, WATCHDOG_INTERVAL);
 }
 
+// chat-update may hand us either a single action or a batch object
+// ({ actions: [...] }) depending on youtubei.js version - handle both so we
+// don't silently drop everything if the shape is different than expected.
+function handleChatUpdate(action) {
+    try {
+        if (action?.actions && Array.isArray(action.actions)) {
+            for (const a of action.actions) parseAction(a);
+            return;
+        }
+        parseAction(action);
+    } catch (err) {
+        console.error("[youtubeChat] handleChatUpdate error:", err.message);
+    }
+}
+
 async function parseAction(action) {
+    if (DEBUG) {
+        try {
+            const shape = JSON.stringify(
+                action,
+                (k, v) => (typeof v === "bigint" ? v.toString() : v),
+                0
+            );
+            debugLog("raw action shape:", shape?.slice(0, 1500));
+        } catch (e) {
+            debugLog("raw action (unserializable), top-level keys:", Object.keys(action || {}));
+        }
+    }
+
     const item =
-        action.item ||
+        action?.item ||
         action.addChatItemAction?.item ||
         action.replayChatItemAction?.actions?.[0]?.addChatItemAction?.item;
 
     const renderer =
         item?.liveChatTextMessageRenderer ||
         item?.liveChatPaidMessageRenderer ||
-        item?.liveChatMembershipItemRenderer;
+        item?.liveChatMembershipItemRenderer ||
+        // newer youtubei.js may hand back an already-parsed item directly
+        // (e.g. a LiveChatTextMessage instance) rather than a raw renderer -
+        // fall back to treating the item itself as the renderer.
+        item;
 
-    if (!renderer) return;
+    if (!renderer) {
+        debugLog("parseAction: no renderer/item found on this action, skipping.");
+        return;
+    }
 
     const username =
         renderer.authorName?.simpleText ||
         renderer.authorName?.runs?.map((x) => x.text).join("") ||
+        renderer.author?.name ||
+        renderer.author_name ||
         "Unknown";
 
     const message =
-        renderer.message?.runs?.map((x) => x.text || (x.emoji ? "ð" : "")).join("") || "";
+        renderer.message?.runs?.map((x) => x.text || (x.emoji ? "ð" : "")).join("") ||
+        (typeof renderer.message === "string" ? renderer.message : "") ||
+        (typeof renderer.message?.toString === "function" && renderer.message.toString() !== "[object Object]"
+            ? renderer.message.toString()
+            : "") ||
+        "";
 
-    if (!message) return;
+    if (!message) {
+        debugLog("parseAction: renderer found but message extraction was empty - shape mismatch. Renderer keys:", Object.keys(renderer || {}));
+        return;
+    }
 
     const id = renderer.id || `${username}:${message}`;
     if (seenMessages.has(id)) return;
