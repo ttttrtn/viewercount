@@ -104,6 +104,21 @@ def get_screenshot():
         return latest_screenshot
 
 
+html_lock = threading.Lock()
+latest_html = None
+
+
+def set_html_snippet(html_text):
+    global latest_html
+    with html_lock:
+        latest_html = html_text
+
+
+def get_html_snippet():
+    with html_lock:
+        return latest_html
+
+
 def set_live(live: bool):
     with state_lock:
         state["live"] = live
@@ -169,6 +184,11 @@ async def run_monitor_loop():
                             message_count=len(messages),
                             error=None,
                         )
+                        try:
+                            body_html = await page.locator("body").inner_html()
+                            set_html_snippet(body_html[:200000])
+                        except Exception:
+                            pass
                         if not usernames and not messages:
                             logger.info(
                                 "No chat nodes matched (url=%s title=%r) - selectors may be stale.",
@@ -232,6 +252,14 @@ def screenshot():
     if png is None:
         return jsonify({"error": "no screenshot captured yet"}), 404
     return Response(png, mimetype="image/png")
+
+
+@app.route("/html")
+def html():
+    snippet = get_html_snippet()
+    if snippet is None:
+        return jsonify({"error": "no HTML captured yet"}), 404
+    return Response(snippet, mimetype="text/plain")
 
 
 @app.route("/health")
