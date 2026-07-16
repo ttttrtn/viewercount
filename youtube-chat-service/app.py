@@ -1,7 +1,5 @@
 import os
 import threading
-import sqlite3
-import queue
 from flask import Flask, jsonify
 import pytchat
 
@@ -17,55 +15,90 @@ chat_instance = None
 
 app = Flask(__name__)
 
+
 def get_chat():
     global chat_instance
+
     with state_lock:
-        # Check if we have an instance and it is still running
-        if chat_instance is None or not chat_instance.is_alive():
+        if chat_instance is None:
             if not VIDEO_ID:
+                print("Missing VIDEO_ID")
                 return None
-            
-            # FIX: 
-            # 1. interruptable=False stops the thread error.
-            # 2. force_no_metadata=True prevents the lookup that is crashing.
-            # 3. We pass a dummy channel_id to satisfy the internal requirement.
+
             try:
+                print("Starting YouTube chat...")
+                
                 chat_instance = pytchat.create(
-                    video_id=VIDEO_ID, 
-                    interruptable=False,
-                    force_no_metadata=True
+                    video_id=VIDEO_ID
                 )
+
+                print("YouTube chat connected")
+
             except Exception as e:
-                print(f"Error initializing: {e}")
+                print(f"Chat initialization failed: {e}")
+                chat_instance = None
                 return None
+
         return chat_instance
+
 
 @app.route("/chat")
 def chat():
     global buffer
+
     chat_conn = get_chat()
-    
-    if chat_conn and chat_conn.is_alive():
-        # Get messages without crashing
+
+    if not chat_conn:
+        return jsonify({
+            "live": False,
+            "messages": buffer
+        })
+
+    try:
         data = chat_conn.get()
-        items = data.sync_items()
-        
-        if items:
-            new_msgs = [
-                {"author": c.author.name, "message": c.message, "timestamp": c.timestamp} 
-                for c in items
-            ]
-            with state_lock:
-                buffer.extend(new_msgs)
-                buffer = buffer[-CHAT_BUFFER_MAX:]
-            
-        return jsonify({"live": True, "messages": buffer})
-    
-    return jsonify({"live": False, "messages": buffer})
+
+        if data:
+            items = data.sync_items()
+
+            new_msgs = []
+
+            for c in items:
+                new_msgs.append({
+                    "author": getattr(c.author, "name", "Unknown"),
+                    "message": c.message,
+                    "timestamp": c.timestamp
+                })
+
+            if new_msgs:
+                with state_lock:
+                    buffer.extend(new_msgs)
+                    buffer = buffer[-CHAT_BUFFER_MAX:]
+
+        return jsonify({
+            "live": True,
+            "messages": buffer
+        })
+
+    except Exception as e:
+        print(f"Chat read error: {e}")
+
+        return jsonify({
+            "live": False,
+            "messages": buffer,
+            "error": str(e)
+        })
+
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "video_id": VIDEO_ID
+    })
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    app.run(
+        host="0.0.0.0",
+        port=PORT
+    )
