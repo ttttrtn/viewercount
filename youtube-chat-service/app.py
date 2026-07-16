@@ -15,13 +15,52 @@ streams = {}
 lock = threading.Lock()
 
 
+INNERTUBE_KEY = os.environ.get(
+    "YOUTUBE_INNERTUBE_KEY",
+    "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+)
+
+
+def innertube_request(payload):
+
+    url = (
+        "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
+        f"?key={INNERTUBE_KEY}"
+    )
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    response = requests.post(
+        url,
+        json=payload,
+        headers=headers,
+        timeout=15
+    )
+
+    print(
+        "InnerTube status:",
+        response.status_code
+    )
+
+    return response.json()
+
+
+
 class YouTubeChat:
 
     def __init__(self, video_id):
+
         self.video_id = video_id
         self.messages = []
-        self.running = True
         self.continuation = None
+
+        print(
+            "CREATING CHAT THREAD:",
+            video_id
+        )
 
         self.thread = threading.Thread(
             target=self.worker,
@@ -31,191 +70,216 @@ class YouTubeChat:
         self.thread.start()
 
 
-    def get_initial_data(self):
-
-        url = (
-            "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
-            "?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-        )
-
-        payload = {
-            "context": {
-                "client": {
-                    "clientName": "WEB",
-                    "clientVersion": "2.20260101.00.00"
-                }
-            },
-            "videoId": self.video_id
-        }
-
-        r = requests.post(
-            url,
-            json=payload,
-            timeout=10
-        )
-
-        return r.json()
-
-
-
     def worker(self):
 
         print(
-            "Starting InnerTube chat:",
+            "WORKER STARTED:",
             self.video_id
         )
 
+
         try:
 
-            data = self.get_initial_data()
+            payload = {
 
-            actions = (
+                "context": {
+
+                    "client": {
+
+                        "clientName": "WEB",
+                        "clientVersion": "2.20250715.01.00"
+
+                    }
+
+                },
+
+                "videoId": self.video_id
+            }
+
+
+            print(
+                "REQUESTING INITIAL CHAT"
+            )
+
+
+            data = innertube_request(
+                payload
+            )
+
+
+            print(
+                "INITIAL KEYS:",
+                list(data.keys())
+            )
+
+
+            continuation = (
                 data
                 .get("continuationContents", {})
                 .get("liveChatContinuation", {})
             )
 
-            self.continuation = (
-                actions
-                .get("continuations", [{}])[0]
-                .get("invalidationContinuationData", {})
-                .get("continuation")
+
+            continuations = (
+                continuation
+                .get("continuations", [])
+            )
+
+
+            if continuations:
+
+                self.continuation = (
+                    continuations[0]
+                    .get("timedContinuationData", {})
+                    .get("continuation")
+                    or
+                    continuations[0]
+                    .get("invalidationContinuationData", {})
+                    .get("continuation")
+                )
+
+
+            print(
+                "CONTINUATION:",
+                self.continuation
             )
 
 
         except Exception as e:
 
             print(
-                "Initial chat error:",
-                e
+                "INITIAL CHAT ERROR:",
+                repr(e)
             )
 
             return
 
 
 
-        while self.running:
+        while True:
 
             try:
 
                 if not self.continuation:
+
+                    print(
+                        "NO CONTINUATION"
+                    )
+
                     time.sleep(5)
                     continue
 
 
-                url = (
-                    "https://www.youtube.com/youtubei/v1/live_chat/get_live_chat"
-                    "?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-                )
-
-
                 payload = {
+
                     "context": {
+
                         "client": {
+
                             "clientName": "WEB",
-                            "clientVersion": "2.20260101.00.00"
+                            "clientVersion": "2.20250715.01.00"
+
                         }
+
                     },
+
                     "continuation": self.continuation
+
                 }
 
 
-                r = requests.post(
-                    url,
-                    json=payload,
-                    timeout=10
+                data = innertube_request(
+                    payload
                 )
 
 
-                data = r.json()
-
-
-                continuation = (
+                chat = (
                     data
                     .get("continuationContents", {})
                     .get("liveChatContinuation", {})
                 )
 
 
-                self.continuation = (
-                    continuation
-                    .get("continuations", [{}])[0]
-                    .get("timedContinuationData", {})
-                    .get("continuation")
-                )
-
-
-                actions = continuation.get(
+                for action in chat.get(
                     "actions",
                     []
-                )
+                ):
 
-
-                for action in actions:
-
-                    item = (
+                    renderer = (
                         action
                         .get("addChatItemAction", {})
                         .get("item", {})
-                    )
-
-
-                    renderer = (
-                        item
                         .get("liveChatTextMessageRenderer")
                     )
 
 
-                    if renderer:
+                    if not renderer:
+                        continue
 
-                        author = (
-                            renderer
-                            .get("authorName", {})
-                            .get("simpleText",
-                                 "Unknown")
+
+                    author = (
+                        renderer
+                        .get("authorName", {})
+                        .get("simpleText",
+                             "Unknown")
+                    )
+
+
+                    message = ""
+
+                    for run in (
+                        renderer
+                        .get("message", {})
+                        .get("runs", [])
+                    ):
+
+                        message += run.get(
+                            "text",
+                            ""
                         )
 
 
-                        message = ""
+                    item = {
 
-                        for run in (
-                            renderer
-                            .get("message", {})
-                            .get("runs", [])
-                        ):
-                            message += run.get(
-                                "text",
-                                ""
-                            )
+                        "id": renderer.get("id"),
+                        "author": author,
+                        "message": message,
+                        "timestamp": int(
+                            time.time()
+                        )
 
-
-                        msg = {
-                            "id": renderer.get(
-                                "id"
-                            ),
-                            "author": author,
-                            "message": message,
-                            "timestamp": int(
-                                time.time()
-                            )
-                        }
+                    }
 
 
-                        print(
-                            "CHAT:",
-                            msg
+                    print(
+                        "CHAT MESSAGE:",
+                        item
+                    )
+
+
+                    with lock:
+
+                        self.messages.append(
+                            item
+                        )
+
+                        self.messages = (
+                            self.messages[-CHAT_BUFFER_MAX:]
                         )
 
 
-                        with lock:
+                next_cont = (
+                    chat
+                    .get("continuations", [])
+                )
 
-                            self.messages.append(
-                                msg
-                            )
+                if next_cont:
 
-                            self.messages = (
-                                self.messages[-CHAT_BUFFER_MAX:]
-                            )
+                    self.continuation = (
+                        next_cont[0]
+                        .get("timedContinuationData", {})
+                        .get("continuation")
+                    )
 
 
                 time.sleep(2)
@@ -224,11 +288,21 @@ class YouTubeChat:
             except Exception as e:
 
                 print(
-                    "Chat loop error:",
-                    e
+                    "CHAT LOOP ERROR:",
+                    repr(e)
                 )
 
                 time.sleep(5)
+
+
+
+@app.route("/")
+def home():
+
+    return jsonify({
+        "service": "youtube-inner-tube-chat",
+        "status": "running"
+    })
 
 
 
@@ -239,11 +313,15 @@ def chat():
         "video_id"
     )
 
+
     if not video_id:
 
         return jsonify({
+
             "live": False,
-            "messages": []
+            "messages": [],
+            "error": "missing video_id"
+
         })
 
 
@@ -269,15 +347,6 @@ def chat():
 
 
 
-@app.route("/")
-def home():
-
-    return jsonify({
-        "service": "youtube-inner-tube-chat",
-        "status": "running"
-    })
-
-
 @app.route("/health")
 def health():
 
@@ -288,6 +357,10 @@ def health():
 
 
 if __name__ == "__main__":
+
+    print(
+        "=== INNER TUBE CHAT SERVICE LOADED ==="
+    )
 
     app.run(
         host="0.0.0.0",
