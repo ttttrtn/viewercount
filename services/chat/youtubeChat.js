@@ -26,8 +26,34 @@ function isConfigured() {
 }
 
 async function getClient() {
-    if (!innertubeClient) innertubeClient = await Innertube.create();
+    if (!innertubeClient) {
+        innertubeClient = await Innertube.create({ generate_session_locally: true });
+    }
     return innertubeClient;
+}
+
+// info.getLiveChat() can throw "Live Chat is not available" even for a
+// genuinely live, chat-enabled stream - this is a known intermittent issue
+// with anonymous Innertube sessions (YouTube sometimes omits the chat
+// continuation from the player response). Retry a few times with fresh
+// info before giving up, since a straight failure usually means either the
+// broadcaster disabled chat, or the session is temporarily degraded.
+async function getLiveChatWithRetry(youtube, videoId, attempts = 3) {
+    let lastErr;
+    for (let i = 0; i < attempts; i++) {
+        try {
+            const info = await youtube.getInfo(videoId);
+            debugLog(`getInfo(${videoId}) resolved (attempt ${i + 1}/${attempts}). Fetching live chat handle...`);
+            const chat = await info.getLiveChat();
+            if (chat) return chat;
+            throw new Error("getLiveChat() returned empty result");
+        } catch (err) {
+            lastErr = err;
+            debugLog(`getLiveChat attempt ${i + 1}/${attempts} failed: ${err.message}`);
+            if (i < attempts - 1) await new Promise((r) => setTimeout(r, 3000));
+        }
+    }
+    throw lastErr;
 }
 
 // Resolves the current live video ID via the official Data API. This is the
@@ -90,9 +116,7 @@ async function start(onMessage, onStatus) {
 
         debugLog(`Connecting chat for videoId: ${videoId}`);
         const youtube = await getClient();
-        const info = await youtube.getInfo(videoId);
-        debugLog(`getInfo(${videoId}) resolved. Fetching live chat handle...`);
-        liveChat = await info.getLiveChat();
+        liveChat = await getLiveChatWithRetry(youtube, videoId);
 
         if (!liveChat) throw new Error("No live chat found for resolved video");
 
