@@ -1,3 +1,4 @@
-pytchat>=0.5.5
+flask
+chat-downloader
 Flask>=3.0.0
 requests>=2.31.0
