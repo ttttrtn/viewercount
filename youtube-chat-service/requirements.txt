@@ -1,7 +1,3 @@
-flask
-chat-downloader
-Flask>=3.0.0
-requests>=2.31.0
-flask
-chat-downloader
-pytchat
+Flask==3.1.3
+requests==2.34.2
+gunicorn==23.0.0
