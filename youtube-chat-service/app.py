@@ -305,7 +305,7 @@ def home():
     })
 
 
-
+print("REGISTERING CHAT ROUTE")
 @app.route("/chat")
 def chat():
 
