@@ -1,219 +1,129 @@
-"""
-YouTube live chat sidecar.
-
-Wraps pytchat (taizan-hokuto/pytchat) - the requested library for reading
-YouTube live chat without the expensive liveChatMessages.list polling
-quota cost of the official Data API - and exposes a tiny HTTP API that
-the main Node.js overlay server polls, mirroring the TikTok sidecar's
-shape exactly (GET /chat -> {"live": bool, "messages": [...]}).
-
-pytchat itself needs a specific *video id*, not a channel id, so this
-service has one extra job the TikTok sidecar doesn't: resolving "what is
-this channel's current live video id right now". It does that with the
-official YouTube Data API's cheap videos.list-friendly path when
-possible, falling back to search.list (100 quota units) only when no
-cached video id is already known - the exact same quota-conscious
-approach services/youtube/officialProvider.js uses on the Node side.
-
-Endpoints:
-    GET /chat?channel_id=UC...  -> {"live": bool, "messages": [...]}
-    GET /health                 -> {"ok": true}
-
-YOUTUBE_API_KEY - required to resolve channel_id -> live video id.
-"""
-
 import logging
 import os
 import threading
 import time
-
+import sqlite3
+import queue
 import requests
 from flask import Flask, jsonify, request
-
 import pytchat
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("youtube-chat-sidecar")
-
+# Configuration
 YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "").strip()
 PORT = int(os.environ.get("PORT", "5006"))
-DEBUG_BADGES = os.environ.get("DEBUG_BADGES", "").strip().lower() == "true"
-
-SEARCH_POLL_SECONDS = 180  # how often to re-check for a live video while offline
+SEARCH_POLL_SECONDS = 180
 CHAT_BUFFER_MAX = 200
 
-# Per-channel state: { channel_id: {"video_id": str|None, "chat": pytchat.LiveChat|None,
-#                                    "last_search_at": float, "buffer": [...]} }
+# Setup Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] [%(threadName)s] %(name)s: %(message)s'
+)
+logger = logging.getLogger("youtube-chat-sidecar")
+
+# Thread-safe persistent logging queue
+log_queue = queue.Queue()
+
+def db_worker():
+    """Background worker to handle SQLite writes without blocking API."""
+    conn = sqlite3.connect("chat_logs.db", check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS chat_logs 
+                      (channel_id TEXT, author TEXT, message TEXT, timestamp INTEGER)''')
+    conn.commit()
+    while True:
+        channel_id, messages = log_queue.get()
+        if messages:
+            data = [(channel_id, m["author"], m["message"], m["timestamp"]) for m in messages]
+            cursor.executemany("INSERT INTO chat_logs VALUES (?, ?, ?, ?)", data)
+            conn.commit()
+        log_queue.task_done()
+
+# Start background writer
+threading.Thread(target=db_worker, daemon=True, name="DBWorker").start()
+
+# State Management
 state_lock = threading.Lock()
 channels = {}
-
 
 def get_channel_state(channel_id):
     with state_lock:
         if channel_id not in channels:
             channels[channel_id] = {
-                "video_id": None,
-                "chat": None,
-                "last_search_at": 0,
-                "buffer": [],
+                "video_id": None, "chat": None, "last_search_at": 0,
+                "buffer": [], "lock": threading.Lock()
             }
         return channels[channel_id]
 
-
 def find_live_video_id(channel_id):
-    if not YOUTUBE_API_KEY:
-        logger.error("YOUTUBE_API_KEY is not set - cannot resolve live video id.")
-        return None
-
+    if not YOUTUBE_API_KEY: return None
     try:
-        resp = requests.get(
-            "https://www.googleapis.com/youtube/v3/search",
-            params={
-                "key": YOUTUBE_API_KEY,
-                "channelId": channel_id,
-                "eventType": "live",
-                "type": "video",
-                "part": "id",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
+        resp = requests.get("https://www.googleapis.com/youtube/v3/search", params={
+            "key": YOUTUBE_API_KEY, "channelId": channel_id, "eventType": "live", 
+            "type": "video", "part": "id"
+        }, timeout=10)
         items = resp.json().get("items", [])
-        if not items:
-            return None
-        return items[0]["id"]["videoId"]
-    except Exception as exc:
-        logger.error("search.list failed for %s: %s", channel_id, exc)
+        return items[0]["id"]["videoId"] if items else None
+    except Exception as e:
+        logger.error("Search API error for %s: %s", channel_id, e)
         return None
-
-
-def ensure_chat_connection(channel_id):
-    """Makes sure we have a live pytchat connection for this channel if one
-    is currently live; tears down stale connections; returns current live
-    video id or None."""
-    st = get_channel_state(channel_id)
-    now = time.time()
-
-    # Existing connection: check it's still alive.
-    if st["chat"] is not None:
-        if st["chat"].is_alive():
-            return st["video_id"]
-        logger.info("pytchat connection for %s (video %s) ended.", channel_id, st["video_id"])
-        try:
-            st["chat"].terminate()
-        except Exception:
-            pass
-        st["chat"] = None
-        st["video_id"] = None
-
-    # No connection - only re-search on a slow interval to respect quota.
-    if now - st["last_search_at"] < SEARCH_POLL_SECONDS:
-        return None
-
-    st["last_search_at"] = now
-    video_id = find_live_video_id(channel_id)
-    if not video_id:
-        return None
-
-    logger.info("Channel %s is LIVE (video %s) - connecting pytchat.", channel_id, video_id)
-    try:
-        st["chat"] = pytchat.create(video_id=video_id)
-        st["video_id"] = video_id
-    except Exception as exc:
-        logger.error("pytchat.create failed for %s: %s", video_id, exc)
-        st["chat"] = None
-        st["video_id"] = None
-        return None
-
-    return video_id
-
 
 def author_badges(author):
-    """Turns pytchat's real per-author fields into unified badge objects.
-
-    pytchat's DefaultProcessor documents these author fields (see
-    https://github.com/taizan-hokuto/pytchat/wiki/DefaultProcessor):
-      - isChatOwner      (bool)          -> channel owner
-      - isChatModerator  (bool)          -> moderator
-      - isVerified       (bool)          -> YouTube-verified channel
-      - isChatSponsor    (bool)          -> channel member
-      - badgeUrl         (str)           -> REAL image URL for the member
-                                             badge specifically (the only
-                                             one of these YouTube exposes an
-                                             actual asset for via pytchat)
-
-    We only attach `icon` where pytchat gives us a real URL. Owner/
-    moderator/verified are real, but YouTube doesn't expose static badge
-    art for them through this library - so those badges carry accurate
-    id/name only, and the frontend skips rendering a badge with no icon
-    rather than faking one.
-    """
     badges = []
-
-    if getattr(author, "isChatOwner", False):
-        badges.append({"id": "owner", "name": "Channel Owner"})
-    if getattr(author, "isChatModerator", False):
-        badges.append({"id": "moderator", "name": "Moderator"})
-    if getattr(author, "isVerified", False):
-        badges.append({"id": "verified", "name": "Verified"})
+    if getattr(author, "isChatOwner", False): badges.append({"id": "owner", "name": "Owner"})
+    if getattr(author, "isChatModerator", False): badges.append({"id": "moderator", "name": "Mod"})
     if getattr(author, "isChatSponsor", False):
-        badge = {"id": "member", "name": "Channel Member"}
-        badge_url = getattr(author, "badgeUrl", "") or ""
-        if badge_url:
-            badge["icon"] = badge_url
-        badges.append(badge)
-
-    if DEBUG_BADGES and badges:
-        logger.info("[youtube badges] %s -> %s", getattr(author, "name", "?"), badges)
-
+        b = {"id": "member", "name": "Member"}
+        if author.badgeUrl: b["icon"] = author.badgeUrl
+        badges.append(b)
     return badges
-
 
 def drain_new_comments(channel_id):
     st = get_channel_state(channel_id)
-    if st["chat"] is None:
-        return []
+    with st["lock"]:
+        if st["chat"] is None or not st["chat"].is_alive():
+            return list(st["buffer"])
 
-    try:
-        if not st["chat"].is_alive():
-            return []
         data = st["chat"].get()
         items = data.sync_items() if hasattr(data, "sync_items") else data.items
-        return [
-            {
-                "author": c.author.name,
-                "message": c.message,
-                "timestamp": c.timestamp,
-                "badges": author_badges(c.author),
-            }
-            for c in items
-        ]
-    except Exception as exc:
-        logger.error("Error reading pytchat buffer for %s: %s", channel_id, exc)
-        return []
-
+        if items:
+            new_msgs = [{
+                "author": c.author.name, "message": c.message, 
+                "timestamp": c.timestamp, "badges": author_badges(c.author)
+            } for c in items]
+            
+            st["buffer"].extend(new_msgs)
+            st["buffer"] = st["buffer"][-CHAT_BUFFER_MAX:]
+            log_queue.put((channel_id, new_msgs)) # Send to background worker
+            
+        return list(st["buffer"])
 
 app = Flask(__name__)
 
-
 @app.route("/chat")
 def chat():
-    channel_id = request.args.get("channel_id", "").strip()
-    if not channel_id:
-        return jsonify({"error": "channel_id query param is required"}), 400
-
-    ensure_chat_connection(channel_id)
-    st = get_channel_state(channel_id)
-    live = st["chat"] is not None
-    messages = drain_new_comments(channel_id) if live else []
-
-    return jsonify({"live": live, "messages": messages})
-
+    cid = request.args.get("channel_id", "").strip()
+    if not cid: return jsonify({"error": "Missing channel_id"}), 400
+    
+    st = get_channel_state(cid)
+    with st["lock"]:
+        if st["chat"] is None or not st["chat"].is_alive():
+            # Check if we should re-search
+            if time.time() - st["last_search_at"] > SEARCH_POLL_SECONDS:
+                st["last_search_at"] = time.time()
+                vid = find_live_video_id(cid)
+                if vid:
+                    st["chat"] = pytchat.create(video_id=vid)
+                    st["video_id"] = vid
+                    logger.info("Connected to %s", vid)
+        
+        live = st["chat"] is not None and st["chat"].is_alive()
+        
+    return jsonify({"live": live, "messages": drain_new_comments(cid) if live else []})
 
 @app.route("/health")
 def health():
-    return jsonify({"ok": True, "time": int(time.time())})
-
+    return jsonify({"ok": True, "ts": time.time()})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
