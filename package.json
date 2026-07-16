@@ -14,6 +14,6 @@
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
     "ws": "^8.17.0",
-    "youtubei.js": "^17.2.0"
+    "youtubei.js": "latest"
   }
 }
