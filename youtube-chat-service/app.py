@@ -309,43 +309,48 @@ def home():
 @app.route("/chat")
 def chat():
 
-    video_id = request.args.get(
-        "video_id"
-    )
+    video_id = request.args.get("video_id")
 
+    print("CHAT REQUEST VIDEO ID:", video_id)
 
     if not video_id:
-
         return jsonify({
-
             "live": False,
             "messages": [],
             "error": "missing video_id"
-
         })
 
 
     if video_id not in streams:
 
-        streams[video_id] = YouTubeChat(
-            video_id
-        )
+        print("CREATING NEW STREAM:", video_id)
+
+        streams[video_id] = YouTubeChat(video_id)
+
+
+    else:
+
+        print("STREAM EXISTS:", video_id)
 
 
     with lock:
 
-        messages = streams[video_id].messages
+        msgs = streams[video_id].messages
+
+
+    print(
+        "RETURNING MESSAGES:",
+        len(msgs)
+    )
 
 
     return jsonify({
 
         "live": True,
         "video_id": video_id,
-        "messages": messages
+        "messages": msgs
 
     })
-
-
 
 @app.route("/health")
 def health():
