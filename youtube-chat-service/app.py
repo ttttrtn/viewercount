@@ -1,52 +1,102 @@
 import os
 import threading
-from flask import Flask, jsonify
+import requests
+
+from flask import Flask, jsonify, request
 import pytchat
-
-# Configuration
-VIDEO_ID = os.environ.get("VIDEO_ID", "").strip()
-PORT = int(os.environ.get("PORT", "5006"))
-CHAT_BUFFER_MAX = 200
-
-# State Management
-buffer = []
-state_lock = threading.Lock()
-chat_instance = None
 
 app = Flask(__name__)
 
+CHAT_BUFFER_MAX = 200
 
-def get_chat():
-    global chat_instance
+buffer = []
+chat_instance = None
+current_video_id = None
 
-    with state_lock:
-        if chat_instance is None:
-            if not VIDEO_ID:
-                print("Missing VIDEO_ID")
-                return None
+lock = threading.Lock()
+
+
+def find_live_video(channel_id):
+    """
+    Uses YouTube channel live page to find current live video.
+    """
+
+    try:
+        url = f"https://www.youtube.com/channel/{channel_id}/live"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        r = requests.get(url, headers=headers, timeout=10)
+
+        text = r.text
+
+        marker = '"videoId":"'
+
+        pos = text.find(marker)
+
+        if pos != -1:
+            start = pos + len(marker)
+            video_id = text[start:start+11]
+
+            if len(video_id) == 11:
+                return video_id
+
+    except Exception as e:
+        print("Live lookup error:", e)
+
+    return None
+
+
+def get_chat(video_id):
+
+    global chat_instance, current_video_id
+
+    with lock:
+
+        if (
+            chat_instance is None
+            or current_video_id != video_id
+        ):
+
+            print("Starting YouTube chat:", video_id)
 
             try:
-                print("Starting YouTube chat...")
-                
                 chat_instance = pytchat.create(
-                    video_id=VIDEO_ID
+                    video_id=video_id
                 )
 
-                print("YouTube chat connected")
+                current_video_id = video_id
 
             except Exception as e:
-                print(f"Chat initialization failed: {e}")
+                print("pytchat error:", e)
                 chat_instance = None
-                return None
 
-        return chat_instance
+    return chat_instance
 
 
 @app.route("/chat")
 def chat():
+
     global buffer
 
-    chat_conn = get_chat()
+    channel_id = request.args.get("channel_id")
+    video_id = request.args.get("video_id")
+
+    if not video_id and channel_id:
+        video_id = find_live_video(channel_id)
+
+    if not video_id:
+        return jsonify({
+            "live": False,
+            "messages": [],
+            "error": "No active livestream found"
+        })
+
+
+    chat_conn = get_chat(video_id)
+
 
     if not chat_conn:
         return jsonify({
@@ -54,33 +104,34 @@ def chat():
             "messages": buffer
         })
 
+
     try:
+
         data = chat_conn.get()
 
-        if data:
-            items = data.sync_items()
+        for c in data.sync_items():
 
-            new_msgs = []
+            buffer.append({
+                "platform": "youtube",
+                "author": c.author.name,
+                "message": c.message,
+                "timestamp": c.timestamp
+            })
 
-            for c in items:
-                new_msgs.append({
-                    "author": getattr(c.author, "name", "Unknown"),
-                    "message": c.message,
-                    "timestamp": c.timestamp
-                })
 
-            if new_msgs:
-                with state_lock:
-                    buffer.extend(new_msgs)
-                    buffer = buffer[-CHAT_BUFFER_MAX:]
+        buffer = buffer[-CHAT_BUFFER_MAX:]
+
 
         return jsonify({
             "live": True,
+            "video_id": video_id,
             "messages": buffer
         })
 
+
     except Exception as e:
-        print(f"Chat read error: {e}")
+
+        print("Chat read error:", e)
 
         return jsonify({
             "live": False,
@@ -92,13 +143,14 @@ def chat():
 @app.route("/health")
 def health():
     return jsonify({
-        "status": "ok",
-        "video_id": VIDEO_ID
+        "status": "ok"
     })
 
 
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5006))
+
     app.run(
         host="0.0.0.0",
-        port=PORT
+        port=port
     )
