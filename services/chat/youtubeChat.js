@@ -1,14 +1,9 @@
-// YouTube live chat via youtubei.js
 //
-// Environment:
-// YOUTUBE_VIDEO_ID - Current YouTube Live video ID
-// Example: sNnMeQsXXXk
-
+// YouTube Live Chat via youtubei.js
+// Compatible with youtubei.js 17.2+
 //
-// YouTube Live Chat via youtubei.js 17.2.0
-//
-// Environment:
-// YOUTUBE_VIDEO_ID - Current YouTube Live video ID
+// ENV:
+// YOUTUBE_VIDEO_ID=current live video ID
 //
 
 const { Innertube } = require("youtubei.js");
@@ -21,7 +16,6 @@ const YOUTUBE_VIDEO_ID =
 
 
 let liveChat = null;
-
 let stopped = false;
 
 let onMessageCb = null;
@@ -33,9 +27,7 @@ const seenMessages = new Set();
 
 
 function isConfigured() {
-
     return Boolean(YOUTUBE_VIDEO_ID);
-
 }
 
 
@@ -70,22 +62,31 @@ async function start(onMessage, onStatus) {
 
 
 
-        const info =
-            await youtube.getInfo(
+        // Avoid getInfo parser crashes
+        const basic =
+            await youtube.getBasicInfo(
                 YOUTUBE_VIDEO_ID
             );
 
 
+        console.log(
+            "[youtubeChat] Video:",
+            basic.basic_info?.title || "Unknown"
+        );
+
+
 
         liveChat =
-            await info.getLiveChat();
+            await youtube.getLiveChat(
+                YOUTUBE_VIDEO_ID
+            );
 
 
 
         if (!liveChat) {
 
             console.error(
-                "[youtubeChat] No live chat available"
+                "[youtubeChat] No live chat found"
             );
 
 
@@ -117,19 +118,16 @@ async function start(onMessage, onStatus) {
 
 
 
-        //
-        // Debug events
-        // Helps identify API changes
-        //
-
         liveChat.on(
             "error",
             (err)=>{
+
 
                 console.error(
                     "[youtubeChat] error:",
                     err.message
                 );
+
 
             }
         );
@@ -139,6 +137,7 @@ async function start(onMessage, onStatus) {
         liveChat.on(
             "end",
             ()=>{
+
 
                 console.log(
                     "[youtubeChat] Chat ended"
@@ -151,6 +150,7 @@ async function start(onMessage, onStatus) {
                     live:false
 
                 });
+
 
 
                 if (!stopped) {
@@ -166,26 +166,31 @@ async function start(onMessage, onStatus) {
 
                 }
 
+
             }
         );
 
 
 
-        //
-        // Main chat listener
-        //
-
         liveChat.on(
             "chat-update",
             async(data)=>{
+
 
                 if (!data?.actions)
                     return;
 
 
-                await handleActions(
-                    data.actions
-                );
+                for (const action of data.actions) {
+
+
+                    await parseAction(
+                        action
+                    );
+
+
+                }
+
 
             }
         );
@@ -219,187 +224,6 @@ async function start(onMessage, onStatus) {
         });
 
 
-        if (!stopped) {
-
-            setTimeout(()=>{
-
-                start(
-                    onMessageCb,
-                    onStatusCb
-                );
-
-            },10000);
-
-        }
-
-    }
-
-}
-//
-// Message processing
-//
-
-
-async function handleActions(actions) {
-
-
-    for (const action of actions) {
-
-
-        const item =
-            action.item ||
-            action.addChatItemAction?.item ||
-            action.replayChatItemAction?.actions?.[0]
-                ?.addChatItemAction?.item;
-
-
-
-        if (!item)
-            continue;
-
-
-
-        const renderer =
-
-            item.liveChatTextMessageRenderer ||
-
-            item.liveChatPaidMessageRenderer ||
-
-            item.liveChatMembershipItemRenderer ||
-
-            item.liveChatSponsorshipsGiftPurchaseAnnouncementRenderer ||
-
-            item.liveChatViewerEngagementMessageRenderer;
-
-
-
-        if (!renderer)
-            continue;
-
-
-
-        const username =
-
-            renderer.authorName?.simpleText ||
-
-            renderer.authorName?.runs
-                ?.map(r => r.text)
-                .join("") ||
-
-            "Unknown";
-
-
-
-        const message = extractMessage(
-            renderer
-        );
-
-
-
-        if (!message)
-            continue;
-
-
-
-        const id =
-
-            renderer.id ||
-
-            `${username}:${message}`;
-
-
-
-        if (seenMessages.has(id))
-            continue;
-
-
-
-        seenMessages.add(id);
-
-
-
-        if (seenMessages.size > 2000) {
-
-            seenMessages.clear();
-
-        }
-
-
-
-        let badges = [];
-
-
-
-        try {
-
-
-            badges =
-                await youtubeBadges.resolveBadges(
-
-                    renderer.authorBadges ||
-
-                    []
-
-                );
-
-
-        } catch(err) {
-
-
-            console.error(
-
-                "[youtubeChat] badge error:",
-                err.message
-
-            );
-
-        }
-
-
-
-        const data = {
-
-
-            username,
-
-            message,
-
-
-            badges,
-
-
-            color:null,
-
-
-            timestamp:
-                Math.floor(
-                    Date.now() / 1000
-                ),
-
-
-
-            // Extra information
-            // useful for overlays
-
-            type:
-                getMessageType(
-                    renderer
-                ),
-
-
-
-            amount:
-                renderer.purchaseAmountText
-                    ?.simpleText || null
-
-
-        };
-
-
-
-        onMessageCb?.(data);
-
-
     }
 
 }
@@ -407,109 +231,166 @@ async function handleActions(actions) {
 
 
 
-//
-// Extract message text
-//
 
-function extractMessage(renderer) {
+async function parseAction(action) {
 
 
-    if (renderer.message?.runs) {
+    const item =
+
+        action.item ||
+
+        action.addChatItemAction?.item ||
+
+        action.replayChatItemAction
+            ?.actions?.[0]
+            ?.addChatItemAction
+            ?.item;
 
 
-        return renderer.message.runs
 
-            .map(run => {
-
-
-                if (run.text)
-                    return run.text;
+    if (!item)
+        return;
 
 
-                if (run.emoji)
-                    return run.emoji.shortcuts?.[0]
-                        || "😀";
 
+    const renderer =
+
+        item.liveChatTextMessageRenderer ||
+
+        item.liveChatPaidMessageRenderer ||
+
+        item.liveChatMembershipItemRenderer;
+
+
+
+    if (!renderer)
+        return;
+
+
+
+    const username =
+
+        renderer.authorName?.simpleText ||
+
+        renderer.authorName?.runs
+            ?.map(x=>x.text)
+            .join("") ||
+
+        "Unknown";
+
+
+
+    const message =
+
+        renderer.message?.runs
+            ?.map(x=>{
+
+                if (x.text)
+                    return x.text;
+
+                if (x.emoji)
+                    return "😀";
 
                 return "";
 
-
             })
+            .join("")
+        ||
 
-            .join("");
+        renderer.headerSubtext?.runs
+            ?.map(x=>x.text)
+            .join("")
+        ||
+
+        "";
+
+
+
+    if (!message)
+        return;
+
+
+
+    const id =
+        renderer.id ||
+        `${username}:${message}`;
+
+
+
+    if (seenMessages.has(id))
+        return;
+
+
+
+    seenMessages.add(id);
+
+
+
+    if (seenMessages.size > 2000)
+        seenMessages.clear();
+
+
+
+    let badges = [];
+
+
+    try {
+
+        badges =
+            await youtubeBadges.resolveBadges(
+                renderer.authorBadges || []
+            );
+
+
+    } catch(err) {
+
+
+        console.error(
+            "[youtubeChat] badge error:",
+            err.message
+        );
 
     }
 
 
 
-    // Super Chat fallback
+    onMessageCb?.({
 
-    if (renderer.headerSubtext?.runs) {
+        username,
+
+        message,
+
+        badges,
+
+        color:null,
+
+        timestamp:
+            Math.floor(
+                Date.now()/1000
+            ),
 
 
-        return renderer.headerSubtext.runs
-
-            .map(r => r.text || "")
-
-            .join("");
-
-    }
+        type:
+            renderer.purchaseAmountText
+                ? "superchat"
+                : "message",
 
 
+        amount:
+            renderer.purchaseAmountText
+                ?.simpleText || null
 
-    return "";
+    });
+
 
 }
 
 
 
 
-
-//
-// Identify message type
-//
-
-function getMessageType(renderer) {
-
-
-    if (
-        renderer.purchaseAmountText
-    ) {
-
-        return "superchat";
-
-    }
-
-
-
-    if (
-        renderer.liveChatMembershipItemRenderer
-    ) {
-
-        return "membership";
-
-    }
-
-
-
-    if (
-        renderer.liveChatSponsorshipsGiftPurchaseAnnouncementRenderer
-    ) {
-
-        return "gift";
-
-    }
-
-
-
-    return "message";
-
-}
-//
-// Stop YouTube chat
-//
 
 function stop() {
+
 
     stopped = true;
 
@@ -520,85 +401,14 @@ function stop() {
 
             liveChat.stop();
 
-            console.log(
-                "[youtubeChat] Stopped"
-            );
-
-
-        } catch(err) {
-
-
-            console.error(
-                "[youtubeChat] stop error:",
-                err.message
-            );
-
-
-        }
+        } catch(e){}
 
     }
 
 
     liveChat = null;
 
-
     seenMessages.clear();
-
-}
-
-
-
-
-//
-// Optional debug helper
-// Useful if YouTube changes events again
-//
-
-function debugEvents() {
-
-
-    if (!liveChat)
-        return;
-
-
-
-    const events = [
-
-        "chat-update",
-
-        "metadata-update",
-
-        "message",
-
-        "start",
-
-        "end",
-
-        "error"
-
-    ];
-
-
-
-    for (const event of events) {
-
-
-        liveChat.on(
-            event,
-            (...args)=>{
-
-
-                console.log(
-                    `[youtubeChat:event] ${event}`,
-                    args.length
-                );
-
-
-            }
-        );
-
-
-    }
 
 }
 
@@ -612,30 +422,6 @@ module.exports = {
 
     stop,
 
-    isConfigured,
-
-    debugEvents
+    isConfigured
 
 };
-liveChat.on("error", (err)=>{
-
-    console.error(
-        "[youtubeChat]",
-        err.message
-    );
-
-    if(
-        err.message.includes(
-            "get_live_chat_replay"
-        )
-    ){
-
-        stopped = true;
-
-        try {
-            liveChat.stop();
-        } catch(e){}
-
-    }
-
-});
