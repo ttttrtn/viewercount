@@ -309,9 +309,11 @@ print("REGISTERING CHAT ROUTE")
 @app.route("/chat")
 def chat():
 
+    print("========== CHAT ENDPOINT HIT ==========")
+
     video_id = request.args.get("video_id")
 
-    print("CHAT REQUEST VIDEO ID:", video_id)
+    print("VIDEO ID RECEIVED:", video_id)
 
     if not video_id:
         return jsonify({
@@ -323,33 +325,22 @@ def chat():
 
     if video_id not in streams:
 
-        print("CREATING NEW STREAM:", video_id)
+        print("STARTING NEW YOUTUBE CHAT:", video_id)
 
         streams[video_id] = YouTubeChat(video_id)
 
 
-    else:
-
-        print("STREAM EXISTS:", video_id)
-
-
     with lock:
+        messages = streams[video_id].messages
 
-        msgs = streams[video_id].messages
 
-
-    print(
-        "RETURNING MESSAGES:",
-        len(msgs)
-    )
+    print("MESSAGES COUNT:", len(messages))
 
 
     return jsonify({
-
         "live": True,
         "video_id": video_id,
-        "messages": msgs
-
+        "messages": messages
     })
 
 @app.route("/health")
