@@ -1,37 +1,59 @@
-//
-// YouTube Live Chat via youtubei.js 17.2+
-//
-
 const { Innertube } = require("youtubei.js");
-
 const youtubeBadges = require("./badges/youtubeBadges");
 
-
-const YOUTUBE_VIDEO_ID =
-    process.env.YOUTUBE_VIDEO_ID || "";
-
-
-// ... (keep your existing requires and YOUTUBE_VIDEO_ID)
-
+const YOUTUBE_VIDEO_ID = process.env.YOUTUBE_VIDEO_ID || "";
 let liveChat = null;
 let stopped = false;
 let onMessageCb = null;
 let onStatusCb = null;
-let watchdogTimer = null; // New: Timer variable
-let lastMessageTime = Date.now(); // New: Track activity
-
+let watchdogTimer = null;
+let lastMessageTime = Date.now();
 const seenMessages = new Set();
-const WATCHDOG_INTERVAL = 60000; // 60 seconds (adjust as needed)
+const WATCHDOG_INTERVAL = 60000;
+
+function isConfigured() { return Boolean(YOUTUBE_VIDEO_ID); }
+
+async function start(onMessage, onStatus) {
+    onMessageCb = onMessage;
+    onStatusCb = onStatus;
+    stopped = false;
+    lastMessageTime = Date.now();
+    resetWatchdog();
+
+    try {
+        const youtube = await Innertube.create();
+        const info = await youtube.getInfo(YOUTUBE_VIDEO_ID);
+        liveChat = await info.getLiveChat();
+
+        if (!liveChat) throw new Error("No live chat found");
+
+        onStatusCb?.({ connected: true, live: true });
+        
+        liveChat.on("chat-update", (data) => {
+            if (data?.actions) {
+                lastMessageTime = Date.now();
+                for (const action of data.actions) parseAction(action);
+            }
+        });
+
+        liveChat.on("end", () => {
+            onStatusCb?.({ connected: false, live: false });
+            if (!stopped) setTimeout(() => start(onMessageCb, onStatusCb), 5000);
+        });
+
+        await liveChat.start();
+    } catch (err) {
+        console.error("[youtubeChat] Start error:", err.message);
+        onStatusCb?.({ connected: false, live: false });
+    }
+}
 
 function resetWatchdog() {
-    lastMessageTime = Date.now();
     if (watchdogTimer) clearTimeout(watchdogTimer);
-    
     watchdogTimer = setTimeout(async () => {
-        if (Date.now() - lastMessageTime > WATCHDOG_INTERVAL) {
-            console.warn("[youtubeChat] Watchdog triggered: No messages in 60s, reconnecting...");
+        if (!stopped && Date.now() - lastMessageTime > WATCHDOG_INTERVAL) {
+            console.warn("[youtubeChat] Watchdog: No messages, reconnecting...");
             stop();
-            // Wait a moment then restart
             setTimeout(() => start(onMessageCb, onStatusCb), 2000);
         } else {
             resetWatchdog();
@@ -39,72 +61,32 @@ function resetWatchdog() {
     }, WATCHDOG_INTERVAL);
 }
 
-async function start(onMessage, onStatus) {
-    onMessageCb = onMessage;
-    onStatusCb = onStatus;
-    stopped = false;
-    lastMessageTime = Date.now(); // Reset on start
-    resetWatchdog(); // Start the monitor
+async function parseAction(action) {
+    const item = action.item || action.addChatItemAction?.item || action.replayChatItemAction?.actions?.[0]?.addChatItemAction?.item;
+    const renderer = item?.liveChatTextMessageRenderer || item?.liveChatPaidMessageRenderer || item?.liveChatMembershipItemRenderer;
+    if (!renderer) return;
 
-    if (!YOUTUBE_VIDEO_ID) {
-        console.error("[youtubeChat] Missing YOUTUBE_VIDEO_ID");
-        return;
-    }
+    const username = renderer.authorName?.simpleText || renderer.authorName?.runs?.map(x => x.text).join("") || "Unknown";
+    const message = renderer.message?.runs?.map(x => x.text || (x.emoji ? "😀" : "")).join("") || "";
+    if (!message) return;
 
-    try {
-        console.log(`[youtubeChat] Connecting ${YOUTUBE_VIDEO_ID}`);
-        const youtube = await Innertube.create();
-        let info = await youtube.getInfo(YOUTUBE_VIDEO_ID);
-        
-        console.log("[youtubeChat] Video:", info.basic_info?.title || "Unknown");
-        liveChat = await info.getLiveChat();
+    const id = renderer.id || `${username}:${message}`;
+    if (seenMessages.has(id)) return;
+    seenMessages.add(id);
+    if (seenMessages.size > 2000) seenMessages.clear();
 
-        if (!liveChat) {
-            console.error("[youtubeChat] No live chat found");
-            onStatusCb?.({ connected: false, live: false });
-            return;
-        }
-
-        onStatusCb?.({ connected: true, live: true });
-        console.log("[youtubeChat] Live chat initialized");
-
-        liveChat.on("error", (err) => {
-            console.error("[youtubeChat] error:", err.message);
-        });
-
-        liveChat.on("end", () => {
-            console.log("[youtubeChat] Chat ended");
-            onStatusCb?.({ connected: false, live: false });
-            if (!stopped) {
-                setTimeout(() => start(onMessageCb, onStatusCb), 5000);
-            }
-        });
-
-        liveChat.on("chat-update", async (data) => {
-            if (!data?.actions) return;
-            
-            // If we receive data, reset the watchdog timer
-            lastMessageTime = Date.now(); 
-            
-            for (const action of data.actions) {
-                await parseAction(action);
-            }
-        });
-
-        await liveChat.start();
-        console.log("[youtubeChat] Connected");
-    } catch (err) {
-        console.error("[youtubeChat]", err.message);
-        onStatusCb?.({ connected: false, live: false });
-    }
+    onMessageCb?.({
+        username, message, badges: await youtubeBadges.resolveBadges(renderer.authorBadges || []),
+        color: null, timestamp: Math.floor(Date.now() / 1000),
+        type: renderer.purchaseAmountText ? "superchat" : "message",
+        amount: renderer.purchaseAmountText?.simpleText || null
+    });
 }
 
 function stop() {
     stopped = true;
-    if (watchdogTimer) clearTimeout(watchdogTimer); // Cleanup
-    if (liveChat) {
-        try { liveChat.stop(); } catch(e) {}
-    }
-    liveChat = null;
-    seenMessages.clear();
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    if (liveChat) { try { liveChat.stop(); } catch (e) {} }
 }
+
+module.exports = { start, stop, isConfigured };
