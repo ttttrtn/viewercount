@@ -1,9 +1,11 @@
 const { Innertube } = require("youtubei.js");
 const youtubeBadges = require("./badges/youtubeBadges");
 
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || "";
 const YOUTUBE_CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || "";
-// Optional: if set, skips channel lookup and connects directly to this video's chat.
+// Optional: if set, skips discovery entirely and connects directly to this video's chat.
 const YOUTUBE_VIDEO_ID = process.env.YOUTUBE_VIDEO_ID || "";
+const DEBUG = process.env.DEBUG_YOUTUBE === "true";
 
 let innertubeClient = null;
 let liveChat = null;
@@ -15,8 +17,12 @@ let lastMessageTime = Date.now();
 const seenMessages = new Set();
 const WATCHDOG_INTERVAL = 60000;
 
+function debugLog(...args) {
+    if (DEBUG) console.log("[youtubeChat] [debug]", ...args);
+}
+
 function isConfigured() {
-    return Boolean(YOUTUBE_VIDEO_ID) || Boolean(YOUTUBE_CHANNEL_ID);
+    return Boolean(YOUTUBE_VIDEO_ID) || Boolean(YOUTUBE_API_KEY && YOUTUBE_CHANNEL_ID);
 }
 
 async function getClient() {
@@ -24,42 +30,27 @@ async function getClient() {
     return innertubeClient;
 }
 
-// Resolves the current live video ID for a channel using Innertube only -
-// no official Data API / API key required. Tries a few known access
-// patterns since youtubei.js's channel-tab shape has changed across
-// versions (it mirrors YouTube's internal API, not a stable contract).
+// Resolves the current live video ID via the official Data API. This is the
+// one place we spend quota (a single search.list call, ~100 units) because
+// Innertube's unofficial channel-live detection proved unreliable in
+// practice (false negatives even while confirmed live via the official API).
+// Everything after this - reading chat itself - stays on Innertube, no key
+// needed for that part.
 async function resolveLiveVideoId() {
-    if (!YOUTUBE_CHANNEL_ID) return null;
+    if (!YOUTUBE_API_KEY || !YOUTUBE_CHANNEL_ID) return null;
     try {
-        const youtube = await getClient();
-        const channel = await youtube.getChannel(YOUTUBE_CHANNEL_ID);
-
-        let candidates = [];
-
-        // Pattern 1: dedicated "Live" tab, if the installed version exposes it.
-        if (typeof channel.getLiveStreams === "function") {
-            try {
-                const liveTab = await channel.getLiveStreams();
-                candidates = liveTab?.videos || liveTab?.items || [];
-            } catch (e) {
-                console.warn("[youtubeChat] getLiveStreams() failed, falling back:", e.message);
-            }
+        const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${YOUTUBE_CHANNEL_ID}&eventType=live&type=video&order=date&maxResults=1&key=${YOUTUBE_API_KEY}`;
+        debugLog("Requesting search.list:", url.replace(YOUTUBE_API_KEY, "REDACTED"));
+        const res = await fetch(url);
+        debugLog(`search.list responded with HTTP ${res.status}`);
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            console.error(`[youtubeChat] YouTube API error ${res.status}: ${text}`);
+            return null;
         }
-
-        // Pattern 2: fall back to the channel's default video list and
-        // filter for whichever entries are flagged as currently live.
-        if (!candidates.length) {
-            const videosTab = typeof channel.getVideos === "function"
-                ? await channel.getVideos()
-                : null;
-            candidates = videosTab?.videos || videosTab?.items || channel?.videos || [];
-        }
-
-        const liveVideo = candidates.find(
-            (v) => v?.is_live === true || v?.isLiveNow === true || v?.is_live_now === true || v?.badges?.some?.((b) => /live now/i.test(b?.label || ""))
-        );
-
-        const videoId = liveVideo?.id || liveVideo?.video_id || liveVideo?.videoId || null;
+        const data = await res.json();
+        const videoId = data.items?.[0]?.id?.videoId || null;
+        debugLog(`search.list items found: ${data.items?.length ?? 0} videoId: ${videoId}`);
         if (!videoId) {
             console.warn("[youtubeChat] No live broadcast found for channel right now.");
         }
@@ -83,7 +74,7 @@ async function start(onMessage, onStatus) {
     resetWatchdog();
 
     if (!isConfigured()) {
-        console.warn("[youtubeChat] Not configured (missing YOUTUBE_VIDEO_ID or YOUTUBE_CHANNEL_ID) - skipping.");
+        console.warn("[youtubeChat] Not configured (missing YOUTUBE_VIDEO_ID or YOUTUBE_API_KEY/YOUTUBE_CHANNEL_ID) - skipping.");
         onStatusCb?.({ connected: false, live: false });
         return;
     }
@@ -97,15 +88,19 @@ async function start(onMessage, onStatus) {
             return;
         }
 
+        debugLog(`Connecting chat for videoId: ${videoId}`);
         const youtube = await getClient();
         const info = await youtube.getInfo(videoId);
+        debugLog(`getInfo(${videoId}) resolved. Fetching live chat handle...`);
         liveChat = await info.getLiveChat();
 
         if (!liveChat) throw new Error("No live chat found for resolved video");
 
+        debugLog("Live chat handle acquired, starting listener.");
         onStatusCb?.({ connected: true, live: true });
 
         liveChat.on("chat-update", (data) => {
+            debugLog(`chat-update received, actions: ${data?.actions?.length ?? 0}`);
             if (data?.actions) {
                 lastMessageTime = Date.now();
                 for (const action of data.actions) parseAction(action);
@@ -113,11 +108,13 @@ async function start(onMessage, onStatus) {
         });
 
         liveChat.on("end", () => {
+            debugLog("liveChat 'end' event fired.");
             onStatusCb?.({ connected: false, live: false });
             if (!stopped) safeRetry(() => start(onMessageCb, onStatusCb), 5000);
         });
 
         await liveChat.start();
+        debugLog("liveChat.start() resolved - listener is active.");
     } catch (err) {
         console.error("[youtubeChat] Start error:", err.message);
         onStatusCb?.({ connected: false, live: false });
