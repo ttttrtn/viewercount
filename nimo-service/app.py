@@ -42,7 +42,7 @@ import os
 import threading
 import time
 
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify
 from playwright.async_api import async_playwright
 
 logging.basicConfig(level=logging.INFO)
@@ -73,6 +73,35 @@ chat_lock = threading.Lock()
 chat_buffer = []
 seen_keys = set()
 seen_order = []
+
+# Diagnostics captured on the last poll so /debug can report what the
+# page actually looked like, without needing to reproduce it locally.
+debug_lock = threading.Lock()
+debug_info = {"url": None, "title": None, "username_count": 0, "message_count": 0, "error": None}
+
+screenshot_lock = threading.Lock()
+latest_screenshot = None
+
+
+def set_debug(**kwargs):
+    with debug_lock:
+        debug_info.update(kwargs)
+
+
+def get_debug():
+    with debug_lock:
+        return dict(debug_info)
+
+
+def set_screenshot(png_bytes):
+    global latest_screenshot
+    with screenshot_lock:
+        latest_screenshot = png_bytes
+
+
+def get_screenshot():
+    with screenshot_lock:
+        return latest_screenshot
 
 
 def set_live(live: bool):
@@ -133,6 +162,24 @@ async def run_monitor_loop():
                         usernames = await page.locator(f"xpath={XPATH_USERNAMES}").all_inner_texts()
                         messages = await page.locator(f"xpath={XPATH_MESSAGES}").all_inner_texts()
 
+                        set_debug(
+                            url=page.url,
+                            title=await page.title(),
+                            username_count=len(usernames),
+                            message_count=len(messages),
+                            error=None,
+                        )
+                        if not usernames and not messages:
+                            logger.info(
+                                "No chat nodes matched (url=%s title=%r) - selectors may be stale.",
+                                page.url,
+                                await page.title(),
+                            )
+                            try:
+                                set_screenshot(await page.screenshot(full_page=False))
+                            except Exception:
+                                pass
+
                         for user, msg in zip(usernames, messages):
                             user = (user or "").strip()
                             msg = (msg or "").strip()
@@ -144,6 +191,7 @@ async def run_monitor_loop():
                         # detached, etc.) shouldn't tear down the whole
                         # session - log it and keep polling.
                         logger.warning("Chat read error: %s", inner_exc)
+                        set_debug(error=str(inner_exc))
 
                     await asyncio.sleep(POLL_SECONDS)
 
@@ -171,6 +219,19 @@ app = Flask(__name__)
 @app.route("/chat")
 def chat():
     return jsonify({"live": is_live(), "messages": drain_messages()})
+
+
+@app.route("/debug")
+def debug():
+    return jsonify({"live": is_live(), **get_debug()})
+
+
+@app.route("/screenshot")
+def screenshot():
+    png = get_screenshot()
+    if png is None:
+        return jsonify({"error": "no screenshot captured yet"}), 404
+    return Response(png, mimetype="image/png")
 
 
 @app.route("/health")

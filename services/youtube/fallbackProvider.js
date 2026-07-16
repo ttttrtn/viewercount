@@ -4,272 +4,186 @@
 //
 // Backed by youtubei.js (https://github.com/LuanRT/YouTube.js), an actively
 // maintained client for YouTube's internal "InnerTube" API - the same API
-// youtube.com itself uses. It's a structured JSON API, not HTML scraping.
+// youtube.com itself uses. It's a structured JSON API, not HTML scraping,
+// which is why it was chosen over scraping the watch/channel pages
+// directly (scraping is only used here as a last-resort, and youtubei.js
+// itself does not rely on it for the fields we need).
 //
 // This module is intentionally isolated behind the same
-// { live, viewers, videoId } shape as officialProvider.js.
-const log = require("./logger");
-const { config } = require("./config");
-const { Innertube, Log } = require("youtubei.js");
+// { live, viewers, videoId } shape as officialProvider.js, so it can be
+// swapped for a different fallback implementation later without touching
+// index.js.
 
-// Quiet youtubei.js's internal debug/warn noise (e.g. "Unable to find
-// matching run for attachment run" when it parses unrelated search
-// results' rich text). Real failures still surface via thrown errors,
-// which we catch and log ourselves below.
-try {
-    Log.setLevel(Log.Level.ERROR);
-} catch (e) {
-    // Older/newer youtubei.js versions may not expose Log the same way -
-    // non-fatal, just means we won't be able to suppress its own logging.
+const log = require('./logger');
+const { config } = require('./config');
+
+class FallbackProviderError extends Error {
+  constructor(message, cause) {
+    super(message);
+    this.name = 'FallbackProviderError';
+    this.cause = cause;
+  }
 }
 
-const DEFAULT_TIMEOUT_MS = config?.fallbackTimeoutMs ?? 8000;
+let innertubePromise = null;
 
-let yt;
-let ytInitPromise;
-
-async function getYT({ forceNew = false } = {}) {
-    if (forceNew) {
-        yt = null;
-        ytInitPromise = null;
-    }
-    if (!yt) {
-        if (!ytInitPromise) {
-            ytInitPromise = Innertube.create({
-                generate_session_locally: true
-            }).then(instance => {
-                yt = instance;
-                return instance;
-            }).catch(e => {
-                ytInitPromise = null;
-                throw e;
-            });
-        }
-        return ytInitPromise;
-    }
-    return yt;
+function getInnertube() {
+  if (!innertubePromise) {
+    innertubePromise = (async () => {
+      // Lazy-required so a missing/broken dependency can't prevent the
+      // rest of the app (or the official provider) from working.
+      const { Innertube } = require('youtubei.js');
+      return Innertube.create({ generate_session_locally: true });
+    })().catch((err) => {
+      innertubePromise = null; // allow retrying on the next call
+      throw err;
+    });
+  }
+  return innertubePromise;
 }
 
 function withTimeout(promise, ms, label) {
-    let timer;
-    const timeout = new Promise((_, reject) => {
-        timer = setTimeout(
-            () => reject(new Error(`Timeout after ${ms}ms: ${label}`)),
-            ms
-        );
-    });
-    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function parseNumber(text) {
-    if (text === null || text === undefined) return null;
-    const str = typeof text === "string" ? text : String(text);
-    const match = str
-        .replace(/,/g, "")
-        .match(/([\d.]+)\s*([KMB]?)/i);
-    if (!match) return null;
-    let n = parseFloat(match[1]);
-    switch ((match[2] || "").toUpperCase()) {
-        case "K":
-            n *= 1e3;
-            break;
-        case "M":
-            n *= 1e6;
-            break;
-        case "B":
-            n *= 1e9;
-            break;
+// Turns strings like "1.2K watching", "3,412 watching now", "854 watching"
+// into a best-effort numeric estimate. Returns null if unparseable.
+function parseApproxViewerCount(text) {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.replace(/,/g, '').match(/([\d.]+)\s*([KMB]?)/i);
+  if (!match) return null;
+
+  const num = parseFloat(match[1]);
+  if (!Number.isFinite(num)) return null;
+
+  const suffix = (match[2] || '').toUpperCase();
+  const multiplier = { K: 1e3, M: 1e6, B: 1e9 }[suffix] || 1;
+  return Math.round(num * multiplier);
+}
+
+// Extracts { live, viewers } from a youtubei.js VideoInfo (getBasicInfo/getInfo result).
+function readLiveInfoFromVideo(info) {
+  const basicInfo = info && info.basic_info;
+  if (!basicInfo) return { live: false, viewers: null };
+
+  const live = Boolean(basicInfo.is_live);
+  if (!live) return { live: false, viewers: null };
+
+  // For live videos, view_count on basic_info represents the current
+  // concurrent viewer count (not lifetime views).
+  let viewers = null;
+  if (typeof basicInfo.view_count === 'number') {
+    viewers = basicInfo.view_count;
+  } else if (typeof basicInfo.view_count === 'string') {
+    viewers = parseApproxViewerCount(basicInfo.view_count);
+  }
+
+  return { live: true, viewers };
+}
+
+async function checkVideoById(yt, videoId) {
+  log.debug(`Fallback: checking cached video ${videoId} via getBasicInfo.`);
+  const info = await withTimeout(
+    yt.getBasicInfo(videoId),
+    config.REQUEST_TIMEOUT_MS,
+    'fallback getBasicInfo'
+  );
+  const { live, viewers } = readLiveInfoFromVideo(info);
+  log.debug(`Fallback getBasicInfo(${videoId}) -> live=${live} viewers=${viewers}`);
+  return live ? { live: true, viewers, videoId } : null;
+}
+
+// Scans the channel's videos for one currently flagged as live. Used when
+// we don't already have a candidate video id (e.g. official search.list
+// never got a chance to run). youtubei.js's channel video items expose an
+// `is_live` flag on the live badge / thumbnail overlay; we check a couple
+// of shapes defensively since this is unofficial, undocumented surface
+// that can shift between library versions.
+async function findLiveVideoOnChannel(yt, channelId) {
+  log.debug(`Fallback: browsing channel ${channelId} for a live video.`);
+  const channel = await withTimeout(
+    yt.getChannel(channelId),
+    config.REQUEST_TIMEOUT_MS,
+    'fallback getChannel'
+  );
+
+  const candidateLists = [];
+  if (channel && Array.isArray(channel.videos)) candidateLists.push(channel.videos);
+  if (channel && channel.videos && Array.isArray(channel.videos.videos)) {
+    candidateLists.push(channel.videos.videos);
+  }
+
+  for (const list of candidateLists) {
+    for (const item of list) {
+      const isLive =
+        item.is_live === true ||
+        item.is_live_now === true ||
+        (Array.isArray(item.badges) &&
+          item.badges.some((b) => /live/i.test(b && (b.label || b.text || ''))));
+
+      if (isLive && item.id) {
+        const viewers =
+          parseApproxViewerCount(
+            (item.short_view_count_text && item.short_view_count_text.text) ||
+              (item.view_count && item.view_count.text) ||
+              null
+          );
+        log.debug(`Fallback: found live video ${item.id} on channel browse, approx viewers=${viewers}`);
+        return { live: true, viewers, videoId: item.id };
+      }
     }
-    return Math.round(n);
+  }
+
+  log.debug('Fallback: no live video found while browsing channel.');
+  return null;
 }
 
-// The concurrent "watching now" count lives in primary_info.view_count for
-// live videos - basic_info.view_count is usually the cumulative view count
-// and will be wrong for a live stream.
-function extractConcurrentViewers(info) {
-    const liveViewText =
-        info?.primary_info?.view_count?.view_count?.text ??
-        info?.primary_info?.view_count?.original_view_count ??
-        info?.primary_info?.view_count?.extra_short_view_count?.text ??
-        null;
-
-    const parsed = parseNumber(liveViewText);
-    if (parsed !== null) return parsed;
-
-    log.warn(
-        "Falling back to basic_info.view_count for concurrent viewers - " +
-            "this is likely the cumulative view count, not live viewers."
-    );
-    return Number(info?.basic_info?.view_count) || null;
-}
-
-function looksLikeSessionError(e) {
-    const msg = String(e?.message || e || "").toLowerCase();
-    return (
-        msg.includes("session") ||
-        msg.includes("auth") ||
-        msg.includes("token") ||
-        msg.includes("403") ||
-        msg.includes("401")
-    );
-}
-
-async function withApi(fn, label) {
-    const api = await getYT();
-    try {
-        return await withTimeout(fn(api), DEFAULT_TIMEOUT_MS, label);
-    } catch (e) {
-        if (looksLikeSessionError(e)) {
-            log.warn(`Session appears stale during ${label}, recreating.`, e);
-            const fresh = await getYT({ forceNew: true });
-            return await withTimeout(fn(fresh), DEFAULT_TIMEOUT_MS, label);
-        }
-        throw e;
-    }
-}
-
-function buildResult(info, fallbackVideoId) {
-    return {
-        live: true,
-        viewers: extractConcurrentViewers(info),
-        videoId: info?.basic_info?.id ?? fallbackVideoId
-    };
-}
-
-// Find a live video from a channel's tabs without assuming a specific
-// youtubei.js shape - different versions expose this differently
-// (channel.getLiveStreams(), a "Live" tab, or plain .videos), so we try
-// the known options in order and fall back gracefully.
-async function findLiveFromChannel(channel) {
-    if (typeof channel?.getLiveStreams === "function") {
-        try {
-            const liveTab = await channel.getLiveStreams();
-            const vid =
-                liveTab?.videos?.find(v => v.is_live) ??
-                liveTab?.videos?.[0];
-            if (vid) return vid;
-        } catch (e) {
-            log.warn("getLiveStreams() failed, trying other methods", e);
-        }
-    }
-
-    if (typeof channel?.getTabByName === "function") {
-        try {
-            const liveTab = await channel.getTabByName("Live");
-            const vid = liveTab?.videos?.find(v => v.is_live);
-            if (vid) return vid;
-        } catch (e) {
-            log.warn("getTabByName('Live') failed, trying other methods", e);
-        }
-    }
-
-    if (Array.isArray(channel?.videos)) {
-        const vid = channel.videos.find(v => v.is_live);
-        if (vid) return vid;
-    }
-
-    return null;
-}
-
-// Try to resolve a human-readable channel name/title, needed to make
-// Method 3's search query meaningful. Returns null if nothing usable was
-// found (in which case the caller should skip Method 3 entirely, rather
-// than searching on a raw channel ID, which returns irrelevant results).
-function resolveChannelName(channel) {
-    return (
-        channel?.metadata?.title ??
-        channel?.header?.title?.text ??
-        channel?.header?.author?.name ??
-        null
-    );
-}
-
+/**
+ * Returns { live, viewers, videoId } - the same shape officialProvider
+ * produces - or throws FallbackProviderError if the fallback itself is
+ * unavailable (e.g. dependency missing, InnerTube session failed, or
+ * every lookup strategy errored).
+ */
 async function checkFallback({ channelId, videoId }) {
-    // Method 1: known video ID
-    if (videoId) {
-        try {
-            const info = await withApi(
-                api => api.getInfo(videoId),
-                `getInfo(${videoId})`
-            );
-            if (info?.basic_info?.is_live) {
-                return buildResult(info, videoId);
-            }
-        } catch (e) {
-            log.warn(e);
-        }
+  let yt;
+  try {
+    yt = await getInnertube();
+  } catch (err) {
+    throw new FallbackProviderError(`Fallback provider failed to initialize: ${err.message}`, err);
+  }
+
+  const errors = [];
+
+  if (videoId) {
+    try {
+      const result = await checkVideoById(yt, videoId);
+      if (result) return result;
+      // Known video isn't live anymore - fall through to a channel-level
+      // check in case the stream rotated to a new video id.
+    } catch (err) {
+      errors.push(`getBasicInfo: ${err.message}`);
     }
+  }
 
-    // Method 2: channel's own live tab
-    let channel;
-    let channelName = null;
-    if (channelId) {
-        try {
-            channel = await withApi(
-                api => api.getChannel(channelId),
-                `getChannel(${channelId})`
-            );
-            channelName = resolveChannelName(channel);
-
-            const live = await findLiveFromChannel(channel);
-            if (live) {
-                const info = await withApi(
-                    api => api.getInfo(live.id),
-                    `getInfo(${live.id})`
-                );
-                if (info?.basic_info?.is_live) {
-                    return buildResult(info, live.id);
-                }
-            }
-        } catch (e) {
-            log.warn(e);
-        }
+  if (channelId) {
+    try {
+      const result = await findLiveVideoOnChannel(yt, channelId);
+      if (result) return result;
+    } catch (err) {
+      errors.push(`getChannel: ${err.message}`);
     }
+  }
 
-    // Method 3: search by the channel's resolved name, filtered to videos
-    // actually authored by that channel. Skipped entirely if we have no
-    // name to search on - searching for a raw channel ID returns noisy,
-    // irrelevant results and isn't a meaningful query.
-    if (channelId && channelName) {
-        try {
-            const search = await withApi(
-                api => api.search(channelName, { type: "video" }),
-                `search(${channelName})`
-            );
+  if (errors.length > 0) {
+    throw new FallbackProviderError(`Fallback provider lookups failed: ${errors.join('; ')}`);
+  }
 
-            const live = (search?.results ?? []).find(
-                v =>
-                    v.is_live &&
-                    (v.author?.id === channelId ||
-                        v.author?.channel_id === channelId)
-            );
-
-            if (live) {
-                const info = await withApi(
-                    api => api.getInfo(live.id),
-                    `getInfo(${live.id})`
-                );
-                if (info?.basic_info?.is_live) {
-                    return buildResult(info, live.id);
-                }
-            }
-        } catch (e) {
-            log.warn(e);
-        }
-    } else if (channelId) {
-        log.warn(
-            `Skipping Method 3 (search) for channel ${channelId} - no ` +
-                `channel name could be resolved to search on.`
-        );
-    }
-
-    return {
-        live: false,
-        viewers: null,
-        videoId: null
-    };
+  // No error, just genuinely not live.
+  return { live: false, viewers: null, videoId: null };
 }
 
-module.exports = {
-    checkFallback
-};
+module.exports = { checkFallback, FallbackProviderError, parseApproxViewerCount };

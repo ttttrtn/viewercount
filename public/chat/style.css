@@ -3,6 +3,7 @@
   padding: 0;
   box-sizing: border-box;
 }
+
 html, body {
   width: 100%;
   height: 100%;
@@ -10,6 +11,7 @@ html, body {
   overflow: hidden;
   font-family: 'Segoe UI', Roboto, Arial, sans-serif;
 }
+
 .chat-feed {
   position: fixed;
   bottom: 16px;
@@ -22,12 +24,12 @@ html, body {
   gap: 6px;
   overflow: hidden;
 }
+
 .chat-message {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 15px;
   line-height: 1.35;
   color: #f2f2f5;
   word-break: break-word;
@@ -36,9 +38,11 @@ html, body {
   transform: translateY(10px);
   animation: message-in 220ms ease-out forwards;
 }
+
 .chat-message.leaving {
   animation: message-out 200ms ease-in forwards;
 }
+
 @keyframes message-in {
   from {
     opacity: 0;
@@ -49,6 +53,7 @@ html, body {
     transform: translateY(0);
   }
 }
+
 @keyframes message-out {
   from {
     opacity: 1;
@@ -63,28 +68,33 @@ html, body {
     margin-top: -6px;
   }
 }
+
 .platform-badge {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
   border-radius: 5px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+
 .platform-badge img {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   display: block;
 }
+
 .message-body {
   flex: 1 1 auto;
   min-width: 0;
 }
+
 .username {
-  font-weight: 800;
+  font-weight: 700;
 }
+
 .user-badges {
   display: inline-flex;
   align-items: center;
@@ -92,25 +102,30 @@ html, body {
   margin-left: 6px;
   vertical-align: middle;
 }
+
 .user-badge {
   display: inline-flex;
   width: 16px;
   height: 16px;
 }
+
 .user-badge-icon {
   width: 16px;
   height: 16px;
   display: block;
 }
+
 .colon {
-  margin-right: 3px;
+  margin-right: 4px;
 }
+
 .timestamp {
   font-size: 11px;
   font-weight: 400;
   color: rgba(255, 255, 255, 0.45);
   margin-left: 6px;
 }
+
 .text {
-  color: #ffffff;
+  color: #f2f2f5;
 }
