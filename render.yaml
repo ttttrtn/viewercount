@@ -43,6 +43,8 @@ services:
         sync: false
       - key: INSTAGRAM_LIVE_COMMENTS_URL
         sync: false
+      - key: NIMO_SERVICE_URL
+        sync: false
       - key: PORT
         value: 3000
 
@@ -76,3 +78,20 @@ services:
         sync: false
       - key: PORT
         value: 5006
+
+  # Nimo TV chat sidecar (Python, Playwright + Flask)
+  # Nimo has no official chat API, so this drives a headless Chromium
+  # page against the live room and reads the chat panel's DOM. Deploy
+  # this as its own Render web service, then copy its public URL into
+  # the main service's NIMO_SERVICE_URL env var above.
+  - type: web
+    name: viewer-counter-nimo
+    env: python
+    plan: free
+    buildCommand: pip install -r nimo-service/requirements.txt && playwright install --with-deps chromium
+    startCommand: python nimo-service/app.py
+    envVars:
+      - key: NIMO_URL
+        sync: false
+      - key: PORT
+        value: 5007

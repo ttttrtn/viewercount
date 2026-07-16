@@ -25,6 +25,7 @@
     rumble: 'Rumble',
     tiktok: 'TikTok',
     instagram: 'Instagram',
+    nimo: 'Nimo',
   };
 
   function platformAllowed(platform) {

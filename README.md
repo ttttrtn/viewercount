@@ -327,6 +327,7 @@ ones arrive rather than the widget growing forever.
 | Rumble    | Rumble's official Live Stream API (same URL as the viewer-count service) | Chat/rants are included directly in that response; polled and de-duplicated by message id. |
 | TikTok    | `TikTokLive.py` inside the existing `tiktok-service` sidecar | The same sidecar used for viewer counts now also buffers `CommentEvent`s at `GET /chat`. |
 | Instagram | Config-driven bridge (`INSTAGRAM_LIVE_COMMENTS_URL`) | Instagram has no official Live-comments API and no reliable unofficial one that doesn't require an undocumented, frequently-breaking private endpoint. Rather than hardcode one, this integration stays isolated and idle until you point it at a JSON bridge you control - see `services/chat/instagramChat.js`. |
+| Nimo      | Playwright (headless Chromium) inside a new `nimo-service` sidecar | Nimo has no official chat API either, so the sidecar loads the live room and reads the chat panel's username/message nodes directly, buffering them at `GET /chat`. |
 
 ### New/changed project structure
 
@@ -340,12 +341,16 @@ viewer-counter/
 │       ├── youtubeChat.js       # polls youtube-chat-service
 │       ├── rumbleChat.js
 │       ├── tiktokChat.js        # polls tiktok-service's new /chat endpoint
-│       └── instagramChat.js
+│       ├── instagramChat.js
+│       └── nimoChat.js          # polls nimo-service's /chat endpoint
 ├── youtube-chat-service/        # NEW Python sidecar (pytchat)
 │   ├── app.py
 │   └── requirements.txt
 ├── tiktok-service/
 │   └── app.py                   # extended: now also buffers comments at /chat
+├── nimo-service/                # NEW Python sidecar (Playwright + Flask)
+│   ├── app.py
+│   └── requirements.txt
 └── public/
     └── chat/                    # NEW browser source
         ├── index.html

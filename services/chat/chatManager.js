@@ -1,7 +1,7 @@
 // Central aggregator for all platform chat services.
 //
 // Each platform module (twitchChat, kickChat, youtubeChat, rumbleChat,
-// tiktokChat, instagramChat) exposes the same tiny interface:
+// tiktokChat, instagramChat, nimoChat) exposes the same tiny interface:
 //
 //   start(onMessage, onStatus)  -> begins connecting/polling in the
 //                                  background. Never throws. Calls
@@ -13,7 +13,7 @@
 //
 // normalizedMessage shape (matches the format requested for the project):
 //   {
-//     platform: 'twitch' | 'kick' | 'youtube' | 'rumble' | 'tiktok' | 'instagram',
+//     platform: 'twitch' | 'kick' | 'youtube' | 'rumble' | 'tiktok' | 'instagram' | 'nimo',
 //     username: string,
 //     message: string,
 //     color: string,        // hex color for the username, platform default if unknown
@@ -30,6 +30,7 @@ const youtubeChat = require('./youtubeChat');
 const rumbleChat = require('./rumbleChat');
 const tiktokChat = require('./tiktokChat');
 const instagramChat = require('./instagramChat');
+const nimoChat = require('./nimoChat');
 
 const PLATFORMS = {
   twitch: twitchChat,
@@ -38,6 +39,7 @@ const PLATFORMS = {
   rumble: rumbleChat,
   tiktok: tiktokChat,
   instagram: instagramChat,
+  nimo: nimoChat,
 };
 
 class ChatManager extends EventEmitter {
@@ -136,6 +138,7 @@ function defaultColorFor(platform) {
     rumble: '#85C742',
     tiktok: '#25F4EE',
     instagram: '#E1306C',
+    nimo: '#FF6600',
   };
   return defaults[platform] || '#FFFFFF';
 }
