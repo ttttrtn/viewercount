@@ -27,13 +27,15 @@ Design:
       own from transient page/network issues.
 
 Config:
-    NIMO_URL       - full URL of the Nimo live room, e.g.
-                      https://www.nimo.tv/live/1578570016
+    NIMO_URL       - full URL of the Nimo live room's popout chat, e.g.
+                      https://www.nimo.tv/popout/chat/1578570016
     PORT           - defaults to 5007
 
-The chat panel's DOM structure isn't part of any documented API and can
-change without notice - if Nimo changes their front-end markup, only the
-two XPATH_* selectors below need updating.
+The chat panel's DOM isn't part of any documented API and can change
+without notice - if Nimo changes their front-end markup, only
+CHAT_EXTRACT_JS below needs updating. GET /html and GET /screenshot
+exist purely to make that kind of update possible without needing to
+reproduce the page locally.
 """
 
 import asyncio
@@ -56,15 +58,37 @@ RELOAD_BACKOFF_SECONDS = 15
 CHAT_BUFFER_MAX = 200
 SEEN_CACHE_SIZE = 500
 
-# These match the two chat-panel node lists from the reference script -
-# one xpath for the row of usernames, one for the row of messages, read
-# in parallel and zipped together by index.
-XPATH_USERNAMES = (
-    '//*[@id="root"]/div[1]/div[1]/div[1]/div[2]/div[1]/div/div[2]/span[1]/span[2]/span[2]'
-)
-XPATH_MESSAGES = (
-    '//*[@id="root"]/div[1]/div/div[1]/div[2]/div[1]/div/div[2]/span[2]/span'
-)
+# The chat panel's DOM (see /html for a live dump) uses a repeating
+# message-item container rather than fixed positions, so we read it with
+# a single page.evaluate() instead of two positional XPaths - each
+# message row carries its own nickname/content nodes, which keeps
+# username/message pairs correctly aligned even if some rows are system
+# messages or have missing pieces.
+#
+# Real markup (as of the last time this was captured from a live room):
+#   <div class="nimo-room__chatroom__message-item">
+#     <span class="... n-as-inline-block ...">
+#       <span class="nm-message-nickname ...">USERNAME</span>
+#     </span>
+#     <span class="content nimo-room__chatroom__message-item__content ...">
+#       <span class="n-as-vtm">MESSAGE TEXT</span>
+#     </span>
+#   </div>
+# System messages (channel welcome banner, etc.) use the same structure
+# but their nickname span carries a `system-nickname-color` class, so we
+# filter those out rather than forwarding them as if a viewer said them.
+CHAT_EXTRACT_JS = """
+() => Array.from(document.querySelectorAll('.nimo-room__chatroom__message-item')).map(item => {
+  const nickEl = item.querySelector('.nm-message-nickname');
+  const contentEl = item.querySelector('.content .n-as-vtm')
+    || item.querySelector('.nimo-room__chatroom__message-item__content .n-as-vtm');
+  return {
+    username: nickEl ? nickEl.textContent.trim() : '',
+    message: contentEl ? contentEl.textContent.trim() : '',
+    isSystem: !!(nickEl && nickEl.classList.contains('system-nickname-color')),
+  };
+}).filter(m => m.message && !m.isSystem)
+"""
 
 state_lock = threading.Lock()
 state = {"live": False}
@@ -174,14 +198,13 @@ async def run_monitor_loop():
 
                 while True:
                     try:
-                        usernames = await page.locator(f"xpath={XPATH_USERNAMES}").all_inner_texts()
-                        messages = await page.locator(f"xpath={XPATH_MESSAGES}").all_inner_texts()
+                        rows = await page.evaluate(CHAT_EXTRACT_JS)
 
                         set_debug(
                             url=page.url,
                             title=await page.title(),
-                            username_count=len(usernames),
-                            message_count=len(messages),
+                            username_count=len(rows),
+                            message_count=len(rows),
                             error=None,
                         )
                         try:
@@ -189,7 +212,7 @@ async def run_monitor_loop():
                             set_html_snippet(body_html[:200000])
                         except Exception:
                             pass
-                        if not usernames and not messages:
+                        if not rows:
                             logger.info(
                                 "No chat nodes matched (url=%s title=%r) - selectors may be stale.",
                                 page.url,
@@ -200,9 +223,9 @@ async def run_monitor_loop():
                             except Exception:
                                 pass
 
-                        for user, msg in zip(usernames, messages):
-                            user = (user or "").strip()
-                            msg = (msg or "").strip()
+                        for row in rows:
+                            user = (row.get("username") or "").strip()
+                            msg = (row.get("message") or "").strip()
                             if not msg:
                                 continue
                             push_message(user or "unknown", msg)
