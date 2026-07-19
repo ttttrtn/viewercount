@@ -1,14 +1,5 @@
 // Reads Rumble live chat.
-//
-// Rumble's official Live Stream API (the same pre-authenticated URL used
-// by services/rumble.js for viewer counts) also returns recent chat
-// messages and rants for the active livestream, capped at 50 results.
-// There's no push/WebSocket transport for it - it's poll-only - so this
-// module polls on a modest interval and de-dupes by message id so the
-// same message never gets broadcast twice.
-//
-// RUMBLE_API_URL - reused from the viewer-count config.
-// RUMBLE_CHANNEL - reused from the viewer-count config (optional).
+// Filters out specific spam domains/links.
 
 const RUMBLE_API_URL = process.env.RUMBLE_API_URL || '';
 const RUMBLE_API_KEY = process.env.RUMBLE_API_KEY || '';
@@ -17,6 +8,9 @@ const RUMBLE_CHANNEL = process.env.RUMBLE_CHANNEL || '';
 const POLL_INTERVAL_MS = 15000;
 const MAX_BACKOFF_MS = 2 * 60 * 1000;
 const SEEN_ID_CACHE_SIZE = 300;
+
+// Regex to match the specified spam messages
+const SPAM_PATTERN = /casinohunters\.cc|discord\.gg\/casinohunters/i;
 
 let pollTimer = null;
 let stopped = false;
@@ -52,10 +46,6 @@ function pickLivestream(data) {
   return streams.find((s) => s.is_live) || null;
 }
 
-// Rumble's documented response nests chat under the livestream entry;
-// the exact key has varied across API revisions, so check a few
-// plausible shapes rather than hardcoding one and silently going quiet
-// if Rumble tweaks the field name.
 function extractMessages(stream) {
   if (!stream) return [];
 
@@ -99,13 +89,22 @@ async function pollOnce() {
     messages.forEach((m) => {
       const id = m.id || m.message_id || `${m.username}-${m.created_on || m.timestamp}-${m.text || m.message}`;
       if (seenMessageIds.has(id)) return;
+      
+      const text = m.text || m.message || '';
+      
+      // Filter out spam
+      if (SPAM_PATTERN.test(text)) {
+        markSeen(id); // Mark as seen so we don't re-process it
+        return;
+      }
+
       markSeen(id);
 
       if (onMessageCb) {
         const createdAt = m.created_on ? Date.parse(m.created_on) : null;
         onMessageCb({
           username: m.username || m.user || 'unknown',
-          message: m.text || m.message || (m.rant ? `[Rant] ${m.text || ''}` : ''),
+          message: text || (m.rant ? `[Rant] ${m.text || ''}` : ''),
           color: null,
           timestamp: createdAt ? Math.floor(createdAt / 1000) : Math.floor(Date.now() / 1000),
         });
