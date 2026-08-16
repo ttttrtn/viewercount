@@ -1,16 +1,28 @@
 const { Innertube } = require("youtubei.js");
 const youtubeBadges = require("./badges/youtubeBadges");
 
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || "";
-const YOUTUBE_CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID || "";
+const YOUTUBE_STREAMS_URL =
+    "https://www.youtube.com/@RealMalikGPT/streams";
 
-const YOUTUBE_VIDEO_ID = process.env.YOUTUBE_VIDEO_ID || "";
-const YOUTUBE_VIDEO_ID_2 = process.env.YOUTUBE_VIDEO_ID_2 || "";
+const YOUTUBE_API_KEY =
+    process.env.YOUTUBE_API_KEY || "";
 
-const DEBUG = process.env.DEBUG_YOUTUBE === "true";
+const YOUTUBE_CHANNEL_ID =
+    process.env.YOUTUBE_CHANNEL_ID || "";
 
-const RETRY_DELAY = 10000;
-const CHAT_RETRY_DELAY = 5000;
+const YOUTUBE_VIDEO_ID =
+    process.env.YOUTUBE_VIDEO_ID || "";
+
+const YOUTUBE_VIDEO_ID_2 =
+    process.env.YOUTUBE_VIDEO_ID_2 || "";
+
+const DEBUG =
+    process.env.DEBUG_YOUTUBE === "true";
+
+const REQUEST_TIMEOUT = 15000;
+const CHAT_ATTEMPTS = 4;
+const RETRY_DELAY = 5000;
+const RECONNECT_DELAY = 10000;
 const WATCHDOG_INTERVAL = 5 * 60 * 1000;
 
 let innertubeClient = null;
@@ -19,6 +31,8 @@ let liveChat = null;
 let stopped = true;
 let starting = false;
 
+let currentVideoId = null;
+
 let onMessageCb = null;
 let onStatusCb = null;
 
@@ -26,84 +40,429 @@ let reconnectTimer = null;
 let watchdogTimer = null;
 
 let lastMessageTime = 0;
-let currentVideoId = null;
 
 const seenMessages = new Set();
 
-/* ---------------------------------------------------------
-   Logging
---------------------------------------------------------- */
+/* =========================================================
+   LOGGING
+========================================================= */
 
 function debugLog(...args) {
     if (DEBUG) {
-        console.log("[youtubeChat][debug]", ...args);
+        console.log(
+            "[youtubeChat][debug]",
+            ...args
+        );
     }
 }
 
 function log(...args) {
-    console.log("[youtubeChat]", ...args);
-}
-
-/* ---------------------------------------------------------
-   Configuration
---------------------------------------------------------- */
-
-function isConfigured() {
-    return Boolean(
-        YOUTUBE_VIDEO_ID ||
-        YOUTUBE_VIDEO_ID_2 ||
-        (YOUTUBE_API_KEY && YOUTUBE_CHANNEL_ID)
+    console.log(
+        "[youtubeChat]",
+        ...args
     );
 }
 
-/* ---------------------------------------------------------
-   YouTube client
---------------------------------------------------------- */
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function sleep(ms) {
+    return new Promise(
+        resolve => setTimeout(resolve, ms)
+    );
+}
+
+async function withTimeout(
+    promise,
+    ms,
+    name
+) {
+    let timer;
+
+    const timeoutPromise =
+        new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                reject(
+                    new Error(
+                        `${name} timed out after ${ms}ms`
+                    )
+                );
+            }, ms);
+        });
+
+    try {
+        return await Promise.race([
+            promise,
+            timeoutPromise
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/* =========================================================
+   CONFIG
+========================================================= */
+
+function isConfigured() {
+    return Boolean(
+        YOUTUBE_STREAMS_URL ||
+        YOUTUBE_VIDEO_ID ||
+        YOUTUBE_VIDEO_ID_2 ||
+        (
+            YOUTUBE_API_KEY &&
+            YOUTUBE_CHANNEL_ID
+        )
+    );
+}
+
+/* =========================================================
+   YOUTUBE CLIENT
+========================================================= */
 
 async function getClient() {
     if (!innertubeClient) {
-        log("Creating YouTube client...");
+        log(
+            "Creating YouTube client..."
+        );
 
-        innertubeClient = await Innertube.create({
-            generate_session_locally: true
-        });
+        innertubeClient =
+            await Innertube.create({
+                generate_session_locally: true
+            });
 
-        log("YouTube client ready");
+        log(
+            "YouTube client ready"
+        );
     }
 
     return innertubeClient;
 }
 
-/* ---------------------------------------------------------
-   Find currently live video
---------------------------------------------------------- */
+/* =========================================================
+   EXTRACT VIDEO IDS FROM HTML
+========================================================= */
 
-async function resolveLiveVideoId() {
-    if (!YOUTUBE_API_KEY || !YOUTUBE_CHANNEL_ID) {
-        debugLog("YouTube API discovery disabled");
+function extractVideoIds(html) {
+    const ids = new Set();
+
+    const patterns = [
+        /"videoId":"([a-zA-Z0-9_-]{11})"/g,
+
+        /"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"/g,
+
+        /watch\?v=([a-zA-Z0-9_-]{11})/g,
+
+        /youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/g
+    ];
+
+    for (const pattern of patterns) {
+        let match;
+
+        while (
+            (match = pattern.exec(html)) !== null
+        ) {
+            if (match[1]) {
+                ids.add(match[1]);
+            }
+        }
+    }
+
+    return [...ids];
+}
+
+/* =========================================================
+   SEARCH STREAMS PAGE
+========================================================= */
+
+async function searchStreamsPage() {
+    try {
+        log(
+            "Searching YouTube streams page..."
+        );
+
+        debugLog(
+            YOUTUBE_STREAMS_URL
+        );
+
+        const response =
+            await withTimeout(
+                fetch(
+                    YOUTUBE_STREAMS_URL,
+                    {
+                        headers: {
+                            "User-Agent":
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+
+                            "Accept":
+                                "text/html,application/xhtml+xml",
+
+                            "Accept-Language":
+                                "en-US,en;q=0.9"
+                        }
+                    }
+                ),
+                REQUEST_TIMEOUT,
+                "YouTube streams page"
+            );
+
+        if (!response.ok) {
+            throw new Error(
+                `HTTP ${response.status}`
+            );
+        }
+
+        const html =
+            await response.text();
+
+        const ids =
+            extractVideoIds(html);
+
+        debugLog(
+            "Streams page video IDs:",
+            ids
+        );
+
+        return ids;
+
+    } catch (err) {
+        console.error(
+            "[youtubeChat] Streams page error:",
+            err?.message || err
+        );
+
+        return [];
+    }
+}
+
+/* =========================================================
+   CHECK IF VIDEO IS LIVE
+========================================================= */
+
+async function isVideoLive(videoId) {
+    try {
+        const url =
+            `https://www.youtube.com/watch?v=${videoId}`;
+
+        const response =
+            await withTimeout(
+                fetch(
+                    url,
+                    {
+                        headers: {
+                            "User-Agent":
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
+
+                            "Accept-Language":
+                                "en-US,en;q=0.9"
+                        }
+                    }
+                ),
+                REQUEST_TIMEOUT,
+                `YouTube video ${videoId}`
+            );
+
+        if (!response.ok) {
+            return false;
+        }
+
+        const html =
+            await response.text();
+
+        const liveIndicators = [
+            '"isLiveNow":true',
+            '"isLive":true',
+            '"isLiveContent":true',
+            '"liveBroadcastDetails"',
+            "LIVE_NOW",
+            "watching now"
+        ];
+
+        return liveIndicators.some(
+            indicator =>
+                html.includes(indicator)
+        );
+
+    } catch (err) {
+        debugLog(
+            "Live check failed:",
+            videoId,
+            err?.message || err
+        );
+
+        return false;
+    }
+}
+
+/* =========================================================
+   FIND LIVE VIDEO FROM STREAMS PAGE
+========================================================= */
+
+async function resolveFromStreamsPage() {
+    const ids =
+        await searchStreamsPage();
+
+    if (!ids.length) {
+        log(
+            "No video IDs found on streams page"
+        );
+
+        return null;
+    }
+
+    /*
+     * Check every discovered video for
+     * an active live broadcast.
+     */
+    for (const videoId of ids) {
+        debugLog(
+            "Checking stream:",
+            videoId
+        );
+
+        if (
+            await isVideoLive(videoId)
+        ) {
+            log(
+                "Found active livestream:",
+                videoId
+            );
+
+            return videoId;
+        }
+    }
+
+    /*
+     * YouTube sometimes doesn't expose the
+     * live flag in the normal HTML.
+     *
+     * Try the newest stream with youtubei.js
+     * as a second-level check.
+     */
+    const youtube =
+        await getClient();
+
+    for (const videoId of ids) {
+        try {
+            const info =
+                await withTimeout(
+                    youtube.getInfo(videoId),
+                    REQUEST_TIMEOUT,
+                    "youtube.getInfo()"
+                );
+
+            if (!info) {
+                continue;
+            }
+
+            const details =
+                info.basic_info || {};
+
+            debugLog(
+                "youtubei.js video:",
+                videoId,
+                details.title || ""
+            );
+
+            /*
+             * getLiveChat() is the strongest
+             * indication that the video currently
+             * exposes a live chat.
+             */
+            try {
+                const chat =
+                    await withTimeout(
+                        info.getLiveChat(),
+                        REQUEST_TIMEOUT,
+                        "info.getLiveChat()"
+                    );
+
+                if (chat) {
+                    log(
+                        "Found livestream with live chat:",
+                        videoId
+                    );
+
+                    try {
+                        chat.stop();
+                    } catch {}
+
+                    return videoId;
+                }
+            } catch (err) {
+                debugLog(
+                    "Live chat unavailable for:",
+                    videoId,
+                    err?.message || err
+                );
+            }
+
+        } catch (err) {
+            debugLog(
+                "youtubei.js check failed:",
+                videoId,
+                err?.message || err
+            );
+        }
+    }
+
+    /*
+     * Last fallback: use the newest stream.
+     */
+    log(
+        "No explicit live stream detected; using newest stream:",
+        ids[0]
+    );
+
+    return ids[0];
+}
+
+/* =========================================================
+   OFFICIAL API FALLBACK
+========================================================= */
+
+async function resolveFromOfficialApi() {
+    if (
+        !YOUTUBE_API_KEY ||
+        !YOUTUBE_CHANNEL_ID
+    ) {
         return null;
     }
 
     try {
+        debugLog(
+            "Trying YouTube official API..."
+        );
+
         const url =
             "https://www.googleapis.com/youtube/v3/search" +
-            `?part=snippet` +
-            `&channelId=${encodeURIComponent(YOUTUBE_CHANNEL_ID)}` +
-            `&eventType=live` +
-            `&type=video` +
-            `&order=date` +
-            `&maxResults=5` +
-            `&key=${encodeURIComponent(YOUTUBE_API_KEY)}`;
+            "?part=snippet" +
+            `&channelId=${encodeURIComponent(
+                YOUTUBE_CHANNEL_ID
+            )}` +
+            "&eventType=live" +
+            "&type=video" +
+            "&order=date" +
+            "&maxResults=5" +
+            `&key=${encodeURIComponent(
+                YOUTUBE_API_KEY
+            )}`;
 
-        debugLog("Searching for live YouTube video...");
-
-        const response = await fetch(url);
+        const response =
+            await withTimeout(
+                fetch(url),
+                REQUEST_TIMEOUT,
+                "YouTube API"
+            );
 
         if (!response.ok) {
-            const text = await response.text().catch(() => "");
+            const text =
+                await response.text()
+                    .catch(() => "");
 
             debugLog(
-                "YouTube API error:",
+                "YouTube API:",
                 response.status,
                 text
             );
@@ -111,30 +470,18 @@ async function resolveLiveVideoId() {
             return null;
         }
 
-        const data = await response.json();
+        const data =
+            await response.json();
 
-        const video =
-            data.items?.find(
-                item => item?.id?.videoId
-            );
-
-        if (!video) {
-            debugLog("No live video found through API");
-            return null;
-        }
-
-        const videoId = video.id.videoId;
-
-        debugLog(
-            "Live video discovered:",
-            videoId
+        return (
+            data.items?.[0]
+                ?.id?.videoId ||
+            null
         );
-
-        return videoId;
 
     } catch (err) {
         debugLog(
-            "resolveLiveVideoId error:",
+            "Official API failed:",
             err?.message || err
         );
 
@@ -142,25 +489,55 @@ async function resolveLiveVideoId() {
     }
 }
 
-/* ---------------------------------------------------------
-   Build list of possible videos
---------------------------------------------------------- */
+/* =========================================================
+   GET VIDEO IDS
+========================================================= */
 
 async function getVideoIds() {
     const ids = [];
 
+    /*
+     * Explicit IDs first.
+     */
     if (YOUTUBE_VIDEO_ID) {
-        ids.push(YOUTUBE_VIDEO_ID.trim());
+        ids.push(
+            YOUTUBE_VIDEO_ID.trim()
+        );
     }
 
     if (YOUTUBE_VIDEO_ID_2) {
-        ids.push(YOUTUBE_VIDEO_ID_2.trim());
+        ids.push(
+            YOUTUBE_VIDEO_ID_2.trim()
+        );
     }
 
-    const discovered = await resolveLiveVideoId();
+    /*
+     * MAIN METHOD:
+     *
+     * Search:
+     * https://www.youtube.com/@RealMalikGPT/streams
+     */
+    const streamsVideo =
+        await resolveFromStreamsPage();
 
-    if (discovered) {
-        ids.push(discovered);
+    if (streamsVideo) {
+        ids.push(
+            streamsVideo
+        );
+    }
+
+    /*
+     * API is now only a fallback.
+     * This prevents API quota problems from
+     * blocking stream discovery.
+     */
+    if (!ids.length) {
+        const apiVideo =
+            await resolveFromOfficialApi();
+
+        if (apiVideo) {
+            ids.push(apiVideo);
+        }
     }
 
     return [
@@ -170,68 +547,71 @@ async function getVideoIds() {
     ];
 }
 
-/* ---------------------------------------------------------
-   Get live chat
---------------------------------------------------------- */
+/* =========================================================
+   GET LIVE CHAT
+========================================================= */
 
-async function getLiveChat(youtube, videoId) {
+async function getLiveChat(
+    youtube,
+    videoId
+) {
     debugLog(
         "Loading video:",
         videoId
     );
 
     const info =
-        await youtube.getInfo(videoId);
-
-    debugLog(
-        "Video information loaded:",
-        videoId
-    );
-
-    if (!info) {
-        throw new Error(
-            "YouTube returned no video information"
+        await withTimeout(
+            youtube.getInfo(videoId),
+            REQUEST_TIMEOUT,
+            "youtube.getInfo()"
         );
-    }
 
     debugLog(
-        "Requesting live chat:",
+        "Video info loaded:",
         videoId
     );
 
     const chat =
-        await info.getLiveChat();
+        await withTimeout(
+            info.getLiveChat(),
+            REQUEST_TIMEOUT,
+            "info.getLiveChat()"
+        );
 
     if (!chat) {
         throw new Error(
-            "This video does not currently expose a live chat"
+            "No live chat available"
         );
     }
 
     return chat;
 }
 
-/* ---------------------------------------------------------
-   Retry live chat
---------------------------------------------------------- */
+/* =========================================================
+   RETRY CHAT
+========================================================= */
 
 async function getLiveChatWithRetry(
     youtube,
-    videoId,
-    attempts = 6
+    videoId
 ) {
     let lastError = null;
 
-    for (let attempt = 1; attempt <= attempts; attempt++) {
+    for (
+        let attempt = 1;
+        attempt <= CHAT_ATTEMPTS;
+        attempt++
+    ) {
         if (stopped) {
             throw new Error(
-                "YouTube chat stopped"
+                "Chat stopped"
             );
         }
 
         try {
-            debugLog(
-                `Chat attempt ${attempt}/${attempts}:`,
+            log(
+                `Connecting to YouTube chat ${attempt}/${CHAT_ATTEMPTS}:`,
                 videoId
             );
 
@@ -241,50 +621,44 @@ async function getLiveChatWithRetry(
                     videoId
                 );
 
-            debugLog(
-                "Live chat successfully obtained:",
-                videoId
-            );
-
             return chat;
 
         } catch (err) {
             lastError = err;
 
-            debugLog(
-                `Chat attempt ${attempt}/${attempts} failed:`,
+            console.error(
+                "[youtubeChat]",
+                `Attempt ${attempt}/${CHAT_ATTEMPTS}:`,
                 err?.message || err
             );
 
-            if (attempt < attempts) {
+            if (
+                attempt <
+                CHAT_ATTEMPTS
+            ) {
                 await sleep(
-                    CHAT_RETRY_DELAY
+                    RETRY_DELAY
                 );
             }
         }
     }
 
-    throw lastError ||
+    throw (
+        lastError ||
         new Error(
-            "Unable to obtain live chat"
-        );
-}
-
-/* ---------------------------------------------------------
-   Sleep helper
---------------------------------------------------------- */
-
-function sleep(ms) {
-    return new Promise(
-        resolve => setTimeout(resolve, ms)
+            "Unable to connect to YouTube chat"
+        )
     );
 }
 
-/* ---------------------------------------------------------
-   Status
---------------------------------------------------------- */
+/* =========================================================
+   STATUS
+========================================================= */
 
-function sendStatus(connected, live) {
+function sendStatus(
+    connected,
+    live
+) {
     try {
         onStatusCb?.({
             connected,
@@ -298,56 +672,26 @@ function sendStatus(connected, live) {
     }
 }
 
-/* ---------------------------------------------------------
-   Reconnect
---------------------------------------------------------- */
-
-function scheduleReconnect(delay = RETRY_DELAY) {
-    if (stopped) {
-        return;
-    }
-
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-    }
-
-    debugLog(
-        `Reconnect scheduled in ${delay}ms`
-    );
-
-    reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-
-        start(
-            onMessageCb,
-            onStatusCb
-        ).catch(err => {
-            debugLog(
-                "Reconnect start error:",
-                err?.message || err
-            );
-        });
-
-    }, delay);
-}
-
-/* ---------------------------------------------------------
-   Watchdog
---------------------------------------------------------- */
+/* =========================================================
+   WATCHDOG
+========================================================= */
 
 function resetWatchdog() {
     if (watchdogTimer) {
-        clearTimeout(watchdogTimer);
+        clearTimeout(
+            watchdogTimer
+        );
     }
 
     if (stopped) {
         return;
     }
 
-    watchdogTimer = setTimeout(
-        watchdogCheck,
-        WATCHDOG_INTERVAL
-    );
+    watchdogTimer =
+        setTimeout(
+            watchdogCheck,
+            WATCHDOG_INTERVAL
+        );
 }
 
 function watchdogCheck() {
@@ -356,17 +700,28 @@ function watchdogCheck() {
     }
 
     const inactive =
-        Date.now() - lastMessageTime >
+        Date.now() -
+        lastMessageTime >
         WATCHDOG_INTERVAL;
 
-    if (inactive && liveChat) {
+    if (
+        inactive &&
+        liveChat
+    ) {
         log(
-            "Watchdog: no YouTube messages for 5 minutes, reconnecting..."
+            "Watchdog: reconnecting YouTube chat"
         );
 
         disconnectChat();
 
-        scheduleReconnect(2000);
+        sendStatus(
+            false,
+            false
+        );
+
+        scheduleReconnect(
+            2000
+        );
 
         return;
     }
@@ -374,114 +729,161 @@ function watchdogCheck() {
     resetWatchdog();
 }
 
-/* ---------------------------------------------------------
-   Disconnect current chat
---------------------------------------------------------- */
+/* =========================================================
+   DISCONNECT
+========================================================= */
 
 function disconnectChat() {
-    if (!liveChat) {
-        return;
-    }
-
-    try {
-        liveChat.stop();
-    } catch (err) {
-        debugLog(
-            "Chat stop error:",
-            err?.message || err
-        );
+    if (liveChat) {
+        try {
+            liveChat.stop();
+        } catch {}
     }
 
     liveChat = null;
     currentVideoId = null;
 }
 
-/* ---------------------------------------------------------
-   Attach chat listeners
---------------------------------------------------------- */
+/* =========================================================
+   RECONNECT
+========================================================= */
 
-function attachChat(chat, videoId) {
+function scheduleReconnect(
+    delay = RECONNECT_DELAY
+) {
+    if (
+        stopped ||
+        reconnectTimer
+    ) {
+        return;
+    }
+
+    debugLog(
+        `Reconnect scheduled in ${delay}ms`
+    );
+
+    reconnectTimer =
+        setTimeout(
+            async () => {
+                reconnectTimer = null;
+
+                try {
+                    await start();
+                } catch (err) {
+                    debugLog(
+                        "Reconnect error:",
+                        err?.message || err
+                    );
+                }
+            },
+            delay
+        );
+}
+
+/* =========================================================
+   ATTACH CHAT
+========================================================= */
+
+function attachChat(
+    chat,
+    videoId
+) {
     liveChat = chat;
     currentVideoId = videoId;
 
-    lastMessageTime = Date.now();
+    lastMessageTime =
+        Date.now();
 
     chat.on(
         "chat-update",
         action => {
-            lastMessageTime = Date.now();
+            lastMessageTime =
+                Date.now();
 
             resetWatchdog();
 
-            handleChatUpdate(action);
+            handleChatUpdate(
+                action
+            );
         }
     );
 
     chat.on(
         "end",
         () => {
-            debugLog(
-                "YouTube live chat ended:",
+            log(
+                "YouTube chat ended:",
                 videoId
             );
 
-            if (liveChat === chat) {
+            if (
+                liveChat === chat
+            ) {
                 liveChat = null;
                 currentVideoId = null;
             }
 
-            sendStatus(false, false);
+            sendStatus(
+                false,
+                false
+            );
 
             if (!stopped) {
-                scheduleReconnect(3000);
+                scheduleReconnect(
+                    3000
+                );
             }
         }
     );
 
-    sendStatus(true, true);
+    sendStatus(
+        true,
+        true
+    );
 
     resetWatchdog();
 
-    debugLog(
+    log(
         "YouTube chat connected:",
         videoId
     );
 }
 
-/* ---------------------------------------------------------
-   Start
---------------------------------------------------------- */
+/* =========================================================
+   START
+========================================================= */
 
 async function start(
     onMessage,
     onStatus
 ) {
     if (onMessage) {
-        onMessageCb = onMessage;
+        onMessageCb =
+            onMessage;
     }
 
     if (onStatus) {
-        onStatusCb = onStatus;
+        onStatusCb =
+            onStatus;
     }
 
     if (starting) {
-        debugLog(
-            "Start already in progress"
-        );
-
         return;
     }
 
-    stopped = false;
     starting = true;
+    stopped = false;
 
     try {
         if (!isConfigured()) {
-            console.warn(
-                "[youtubeChat] Missing YouTube configuration"
+            log(
+                "YouTube chat not configured"
             );
 
-            sendStatus(false, false);
+            sendStatus(
+                false,
+                false
+            );
 
             return;
         }
@@ -496,20 +898,20 @@ async function start(
 
         if (!videoIds.length) {
             throw new Error(
-                "No YouTube live video IDs found"
+                "No YouTube video IDs found"
             );
         }
 
         debugLog(
-            "Videos to try:",
-            videoIds.join(", ")
+            "Video IDs:",
+            videoIds
         );
 
-        let connected = false;
-
-        for (const videoId of videoIds) {
+        for (
+            const videoId of videoIds
+        ) {
             if (stopped) {
-                break;
+                return;
             }
 
             try {
@@ -533,21 +935,24 @@ async function start(
                     videoId
                 );
 
-                connected = true;
-
-                break;
+                return;
 
             } catch (err) {
-                debugLog(
-                    `Failed video ${videoId}:`,
+                console.error(
+                    `[youtubeChat] ${videoId}:`,
                     err?.message || err
                 );
             }
         }
 
-        if (!connected && !stopped) {
-            throw new Error(
-                "No available YouTube chat"
+        sendStatus(
+            false,
+            false
+        );
+
+        if (!stopped) {
+            scheduleReconnect(
+                RECONNECT_DELAY
             );
         }
 
@@ -557,11 +962,14 @@ async function start(
             err?.message || err
         );
 
-        sendStatus(false, false);
+        sendStatus(
+            false,
+            false
+        );
 
         if (!stopped) {
             scheduleReconnect(
-                RETRY_DELAY
+                RECONNECT_DELAY
             );
         }
 
@@ -570,40 +978,44 @@ async function start(
     }
 }
 
-/* ---------------------------------------------------------
-   Chat update
---------------------------------------------------------- */
+/* =========================================================
+   CHAT PARSER
+========================================================= */
 
-function handleChatUpdate(action) {
+function handleChatUpdate(
+    action
+) {
     try {
         if (
-            action?.actions &&
-            Array.isArray(action.actions)
+            Array.isArray(
+                action?.actions
+            )
         ) {
-            for (const item of action.actions) {
+            for (
+                const item of action.actions
+            ) {
                 parseAction(item);
             }
         } else {
             parseAction(action);
         }
-
     } catch (err) {
         debugLog(
-            "handleChatUpdate error:",
+            "handleChatUpdate:",
             err?.message || err
         );
     }
 }
 
-/* ---------------------------------------------------------
-   Parse message
---------------------------------------------------------- */
-
-async function parseAction(action) {
+async function parseAction(
+    action
+) {
     try {
         const item =
             action?.item ||
-            action?.addChatItemAction?.item ||
+            action
+                ?.addChatItemAction
+                ?.item ||
             action
                 ?.replayChatItemAction
                 ?.actions?.[0]
@@ -621,9 +1033,14 @@ async function parseAction(action) {
             item;
 
         const username =
-            renderer.authorName?.simpleText ||
-            renderer.authorName?.runs
-                ?.map(x => x.text || "")
+            renderer.authorName
+                ?.simpleText ||
+            renderer.authorName
+                ?.runs
+                ?.map(
+                    x =>
+                        x.text || ""
+                )
                 .join("") ||
             renderer.author?.name ||
             "Unknown";
@@ -638,13 +1055,18 @@ async function parseAction(action) {
             message =
                 renderer.message.runs
                     .map(run => {
-                        if (run.text) {
+                        if (
+                            run.text
+                        ) {
                             return run.text;
                         }
 
-                        if (run.emoji) {
+                        if (
+                            run.emoji
+                        ) {
                             return (
-                                run.emoji.shortcuts?.[0] ||
+                                run.emoji
+                                    .shortcuts?.[0] ||
                                 run.emoji.emojiId ||
                                 "😀"
                             );
@@ -657,9 +1079,11 @@ async function parseAction(action) {
 
         if (
             !message &&
-            typeof renderer.message === "string"
+            typeof renderer.message ===
+                "string"
         ) {
-            message = renderer.message;
+            message =
+                renderer.message;
         }
 
         if (!message.trim()) {
@@ -668,20 +1092,30 @@ async function parseAction(action) {
 
         const id =
             renderer.id ||
-            `${username}:${message}:${Date.now()}`;
+            `${username}:${message}`;
 
-        if (seenMessages.has(id)) {
+        if (
+            seenMessages.has(id)
+        ) {
             return;
         }
 
         seenMessages.add(id);
 
-        if (seenMessages.size > 5000) {
+        if (
+            seenMessages.size >
+            5000
+        ) {
             const first =
-                seenMessages.values().next().value;
+                seenMessages
+                    .values()
+                    .next()
+                    .value;
 
             if (first) {
-                seenMessages.delete(first);
+                seenMessages.delete(
+                    first
+                );
             }
         }
 
@@ -690,7 +1124,8 @@ async function parseAction(action) {
         try {
             badges =
                 await youtubeBadges.resolveBadges(
-                    renderer.authorBadges || []
+                    renderer.authorBadges ||
+                    []
                 );
         } catch (err) {
             debugLog(
@@ -698,16 +1133,6 @@ async function parseAction(action) {
                 err?.message || err
             );
         }
-
-        const isSuperChat =
-            Boolean(
-                renderer.purchaseAmountText
-            );
-
-        const isMembership =
-            Boolean(
-                renderer.headerSubtext
-            );
 
         onMessageCb?.({
             username,
@@ -721,29 +1146,30 @@ async function parseAction(action) {
                 ),
 
             type:
-                isSuperChat
+                renderer.purchaseAmountText
                     ? "superchat"
-                    : isMembership
+                    : renderer.headerSubtext
                         ? "membership"
                         : "message",
 
             amount:
-                renderer.purchaseAmountText
+                renderer
+                    .purchaseAmountText
                     ?.simpleText ||
                 null
         });
 
     } catch (err) {
         debugLog(
-            "parseAction error:",
+            "parseAction:",
             err?.message || err
         );
     }
 }
 
-/* ---------------------------------------------------------
-   Stop
---------------------------------------------------------- */
+/* =========================================================
+   STOP
+========================================================= */
 
 function stop() {
     stopped = true;
@@ -767,16 +1193,19 @@ function stop() {
 
     disconnectChat();
 
+    sendStatus(
+        false,
+        false
+    );
+
     debugLog(
         "YouTube chat stopped"
     );
-
-    sendStatus(false, false);
 }
 
-/* ---------------------------------------------------------
-   Exports
---------------------------------------------------------- */
+/* =========================================================
+   EXPORTS
+========================================================= */
 
 module.exports = {
     start,
