@@ -806,7 +806,3 @@ module.exports = {
     stop,
     isConfigured
 };
-    start,
-    stop,
-    isConfigured
-};
