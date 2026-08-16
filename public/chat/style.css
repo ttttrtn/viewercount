@@ -9,44 +9,49 @@ html, body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+  font-family: 'Inter', 'Segoe UI', Roboto, Arial, sans-serif;
 }
 
 .chat-feed {
   position: fixed;
-  bottom: 16px;
-  left: 16px;
-  width: min(420px, calc(100% - 32px));
-  max-height: calc(100% - 32px);
+  bottom: 12px;
+  left: 12px;
+  width: min(380px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 3px;
   overflow: hidden;
 }
 
+/* No background box behind messages by design - text sits directly over
+   the stream, readable purely via the text-shadow below (xqcchat-style). */
 .chat-message {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  font-size: 15px;
-  line-height: 1.35;
-  color: #f2f2f5;
+  gap: 6px;
+  font-size: 13.5px;
+  line-height: 1.3;
+  color: #f5f5f7;
   word-break: break-word;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85), 0 0 6px rgba(0, 0, 0, 0.5);
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    0 0 4px rgba(0, 0, 0, 0.8),
+    0 0 8px rgba(0, 0, 0, 0.5);
   opacity: 0;
-  transform: translateY(10px);
-  animation: message-in 220ms ease-out forwards;
+  transform: translateY(14px);
+  animation: message-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 
 .chat-message.leaving {
-  animation: message-out 200ms ease-in forwards;
+  animation: message-out 160ms ease-in forwards;
 }
 
 @keyframes message-in {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(14px);
   }
   to {
     opacity: 1;
@@ -65,25 +70,26 @@ html, body {
     max-height: 0;
     padding-top: 0;
     padding-bottom: 0;
-    margin-top: -6px;
+    margin-top: -3px;
   }
 }
 
 .platform-badge {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   margin-top: 2px;
-  border-radius: 5px;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .platform-badge img {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   display: block;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.6));
 }
 
 .message-body {
@@ -93,39 +99,41 @@ html, body {
 
 .username {
   font-weight: 700;
+  letter-spacing: 0.1px;
 }
 
 .user-badges {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  margin-left: 6px;
+  gap: 2px;
+  margin-left: 4px;
   vertical-align: middle;
 }
 
 .user-badge {
   display: inline-flex;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .user-badge-icon {
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   display: block;
 }
 
 .colon {
-  margin-right: 4px;
+  margin-right: 3px;
 }
 
 .timestamp {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 400;
-  color: rgba(255, 255, 255, 0.45);
-  margin-left: 6px;
+  color: rgba(255, 255, 255, 0.5);
+  margin-left: 5px;
 }
 
 .text {
-  color: #f2f2f5;
+  color: #f5f5f7;
+  font-weight: 400;
 }
