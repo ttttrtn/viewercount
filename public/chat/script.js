@@ -112,7 +112,7 @@
   }
 
   function connect() {
-    const socket = io('/chat', {
+    const socket = io((window.VIEWER_COUNTER_API_BASE || '') + '/chat', {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1500,

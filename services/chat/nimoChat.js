@@ -1,19 +1,25 @@
 // Reads Nimo TV live chat.
 //
 // Nimo has no official public API for live chat, so this integration
-// pairs with a small Python sidecar (see /nimo-service) that drives a
-// headless Playwright/Chromium page against the live room and buffers
-// the username/message pairs it reads off the chat panel's DOM. This
-// module just polls that sidecar's GET /chat endpoint and re-emits the
-// results as normalized messages - the exact same split used for TikTok
+// pairs with the combined TikTok+Nimo Python sidecar (see
+// /platform-sidecar), which drives a headless Playwright/Chromium page
+// against the live room and buffers the username/message pairs it reads
+// off the chat panel's DOM. This module just polls that sidecar's
+// GET /nimo/chat endpoint and re-emits the results as normalized
+// messages - the exact same split used for TikTok
 // (see services/chat/tiktokChat.js).
 //
-// NIMO_SERVICE_URL - base URL of the deployed /nimo-service sidecar,
-//   e.g. https://your-nimo-sidecar.onrender.com
+// PLATFORM_SIDECAR_URL - base URL of the deployed /platform-sidecar
+//   service, e.g. https://viewer-counter-sidecar.onrender.com
+//   (same URL used for TikTok - shared with services/tiktok.js)
 
-const NIMO_SERVICE_URL = (process.env.NIMO_SERVICE_URL || '').replace(/\/+$/, '');
+const NIMO_SERVICE_URL = (process.env.PLATFORM_SIDECAR_URL || '').replace(/\/+$/, '');
 
-const POLL_INTERVAL_MS = 3000;
+// Poll fast while connected/live so chat feels real-time; back off
+// while offline so the sidecar (and this loop) isn't hammered for no
+// reason between streams.
+const LIVE_POLL_INTERVAL_MS = 3000;
+const OFFLINE_POLL_INTERVAL_MS = 15000;
 const FETCH_TIMEOUT_MS = 4000;
 
 let pollTimer = null;
@@ -39,7 +45,7 @@ async function fetchWithTimeout(url, timeoutMs) {
 
 async function pollOnce() {
   try {
-    const res = await fetchWithTimeout(`${NIMO_SERVICE_URL}/chat`, FETCH_TIMEOUT_MS);
+    const res = await fetchWithTimeout(`${NIMO_SERVICE_URL}/nimo/chat`, FETCH_TIMEOUT_MS);
 
     if (!res.ok) {
       throw new Error(`sidecar returned ${res.status}`);
@@ -71,7 +77,7 @@ async function pollOnce() {
     }
     console.error('[nimoChat] error reaching sidecar:', err.message);
   } finally {
-    if (!stopped) pollTimer = setTimeout(pollOnce, POLL_INTERVAL_MS);
+    if (!stopped) pollTimer = setTimeout(pollOnce, lastConnected ? LIVE_POLL_INTERVAL_MS : OFFLINE_POLL_INTERVAL_MS);
   }
 }
 
@@ -83,7 +89,7 @@ function start(onMessage, onStatus) {
   if (!NIMO_SERVICE_URL) {
     if (!warnedNoService) {
       warnedNoService = true;
-      console.log('[nimoChat] NIMO_SERVICE_URL is not set. Skipping Nimo chat.');
+      console.log('[nimoChat] PLATFORM_SIDECAR_URL is not set. Skipping Nimo chat.');
     }
     return;
   }

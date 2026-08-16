@@ -1,15 +1,19 @@
-// TikTok LIVE chat, via the same TikTokLive.py Python sidecar already
-// used for viewer counts (see /tiktok-service). The sidecar now also
-// buffers incoming CommentEvents and exposes them at GET /chat, which
-// this module polls and re-emits as normalized messages.
+// TikTok LIVE chat, via the combined TikTok+Nimo Python sidecar (see
+// /platform-sidecar). The sidecar buffers incoming CommentEvents and
+// exposes them at GET /tiktok/chat, which this module polls and
+// re-emits as normalized messages.
 //
-// TIKTOK_SERVICE_URL - reused from the viewer-count config.
+// PLATFORM_SIDECAR_URL - reused from the viewer-count config.
 
 const tiktokBadges = require('./badges/tiktokBadges');
 
-const TIKTOK_SERVICE_URL = (process.env.TIKTOK_SERVICE_URL || '').replace(/\/+$/, '');
+const TIKTOK_SERVICE_URL = (process.env.PLATFORM_SIDECAR_URL || '').replace(/\/+$/, '');
 
-const POLL_INTERVAL_MS = 3000;
+// Poll fast while connected/live so chat feels real-time; back off
+// while offline so the sidecar (and this loop) isn't hammered for no
+// reason between streams.
+const LIVE_POLL_INTERVAL_MS = 3000;
+const OFFLINE_POLL_INTERVAL_MS = 15000;
 const FETCH_TIMEOUT_MS = 4000;
 
 let pollTimer = null;
@@ -34,7 +38,7 @@ async function fetchWithTimeout(url, timeoutMs) {
 
 async function pollOnce() {
   try {
-    const res = await fetchWithTimeout(`${TIKTOK_SERVICE_URL}/chat`, FETCH_TIMEOUT_MS);
+    const res = await fetchWithTimeout(`${TIKTOK_SERVICE_URL}/tiktok/chat`, FETCH_TIMEOUT_MS);
 
     if (!res.ok) {
       throw new Error(`sidecar returned ${res.status}`);
@@ -73,7 +77,7 @@ async function pollOnce() {
     }
     console.error('[tiktokChat] error reaching sidecar:', err.message);
   } finally {
-    if (!stopped) pollTimer = setTimeout(pollOnce, POLL_INTERVAL_MS);
+    if (!stopped) pollTimer = setTimeout(pollOnce, lastConnected ? LIVE_POLL_INTERVAL_MS : OFFLINE_POLL_INTERVAL_MS);
   }
 }
 
@@ -83,7 +87,7 @@ function start(onMessage, onStatus) {
   stopped = false;
 
   if (!TIKTOK_SERVICE_URL) {
-    console.error('[tiktokChat] TIKTOK_SERVICE_URL is not set. Skipping TikTok chat.');
+    console.error('[tiktokChat] PLATFORM_SIDECAR_URL is not set. Skipping TikTok chat.');
     return;
   }
 

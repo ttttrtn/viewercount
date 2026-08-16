@@ -113,7 +113,7 @@
 
   async function fetchViewers() {
     try {
-      const res = await fetch('/api/viewers', { cache: 'no-store' });
+      const res = await fetch(`${(window.VIEWER_COUNTER_API_BASE || '')}/api/viewers`, { cache: 'no-store' });
       if (!res.ok) return;
 
       const data = await res.json();

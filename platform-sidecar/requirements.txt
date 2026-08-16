@@ -1,0 +1,4 @@
+Flask>=3.0.0
+gunicorn==23.0.0
+TikTokLive>=6.6.5
+playwright>=1.44.0

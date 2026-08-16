@@ -1,5 +1,32 @@
+# Optimized for Render's $0 / no-credit-card free tier.
+#
+# IMPORTANT MATH: Render's free tier grants 750 pooled instance-hours per
+# *workspace* per month, not 750 hours per service. One always-on free
+# service uses ~730 hours/month (nearly the whole pool). Two always-on
+# free services use ~1,460 hours/month combined - that exceeds the pool
+# in about two weeks, after which ALL your free services get suspended
+# for the rest of the month. This is why this file defines exactly two
+# always-on services (not the original four): that's the most platform
+# coverage that reliably fits inside the 750-hour pool with headroom.
+#
+# Services removed vs. the original render.yaml:
+#   - viewer-counter-youtube-chat: dead code. server.js/services/chat/
+#     youtubeChat.js already gets YouTube chat via youtubei.js directly
+#     in Node - nothing in this repo ever called this service's URL.
+#     Deleting it costs zero functionality and saves ~730 hrs/month.
+#   - viewer-counter-nimo: merged into viewer-counter-tiktok below
+#     (renamed viewer-counter-sidecar) - see /platform-sidecar.
+#
+# The static frontend (public/) is no longer deployed as part of this
+# file - deploy it to Cloudflare Pages instead (free, not part of
+# Render's instance-hour pool at all). See the Cloudflare Pages section
+# in the writeup for exact steps. The Node service below still serves
+# public/ too, so nothing breaks if you skip Cloudflare Pages.
+
 services:
-  # Main overlay web service (Node/Express)
+  # Main overlay web service (Node/Express + Socket.IO).
+  # Must stay always-on: it holds the live WebSocket connections that
+  # power the /chat overlay, and serves /api/viewers on every OBS poll.
   - type: web
     name: viewer-counter
     env: node
@@ -25,13 +52,13 @@ services:
         sync: false
       - key: RUMBLE_CHANNEL
         sync: false
-      - key: TIKTOK_SERVICE_URL
+      - key: PLATFORM_SIDECAR_URL
+        sync: false
+      - key: TIKTOK_USERNAME
         sync: false
       - key: YOUTUBE_API_KEY
         sync: false
       - key: YOUTUBE_CHANNEL_ID
-        sync: false
-      - key: YOUTUBE_CHAT_SERVICE_URL
         sync: false
       - key: KICK_CHATROOM_ID
         sync: false
@@ -43,57 +70,33 @@ services:
         sync: false
       - key: INSTAGRAM_LIVE_COMMENTS_URL
         sync: false
-      - key: NIMO_SERVICE_URL
+      - key: ALLOWED_ORIGIN
         sync: false
       - key: PORT
         value: 3000
 
-  # TikTok LIVE sidecar (Python, TikTokLive.py + Flask)
-  # Handles BOTH viewer counts (/status) and chat (/chat).
-  # Deploy this as its own Render web service, then copy its public URL
-  # into the main service's TIKTOK_SERVICE_URL env var above.
+  # Combined TikTok + Nimo sidecar (Python, TikTokLive.py + Playwright +
+  # Flask). Handles TikTok viewer counts + chat AND Nimo chat in one
+  # process - see /platform-sidecar/app.py for why combining these two
+  # (and only these two) is safe. Must stay always-on: both platforms
+  # need a persistent connection (TikTok websocket / Nimo browser
+  # session) that can't be recreated on-demand per request without
+  # losing chat continuity.
+  #
+  # Deploy this, then copy its public Render URL into the main service's
+  # PLATFORM_SIDECAR_URL env var above.
   - type: web
-    name: viewer-counter-tiktok
+    name: viewer-counter-sidecar
     env: python
     plan: free
-    buildCommand: pip install -r tiktok-service/requirements.txt
-    startCommand: python tiktok-service/app.py
+    buildCommand: pip install -r platform-sidecar/requirements.txt && playwright install --with-deps chromium
+    startCommand: python platform-sidecar/app.py
     envVars:
       - key: TIKTOK_USERNAME
         sync: false
-      - key: PORT
-        value: 5005
-
-  # YouTube live chat sidecar (Python, pytchat + Flask)
-  # Deploy this as its own Render web service, then copy its public URL
-  # into the main service's YOUTUBE_CHAT_SERVICE_URL env var above.
-  - type: web
-    name: viewer-counter-youtube-chat
-    env: python
-    plan: free
-    buildCommand: pip install -r youtube-chat-service/requirements.txt
-    startCommand: python youtube-chat-service/app.py
-    envVars:
-      - key: YOUTUBE_API_KEY
-        sync: false
-      - key: PORT
-        value: 5006
-
-  # Nimo TV chat sidecar (Python, Playwright + Flask)
-  # Nimo has no official chat API, so this drives a headless Chromium
-  # page against the live room and reads the chat panel's DOM. Deploy
-  # this as its own Render web service, then copy its public URL into
-  # the main service's NIMO_SERVICE_URL env var above.
-  - type: web
-    name: viewer-counter-nimo
-    env: python
-    plan: free
-    buildCommand: pip install -r nimo-service/requirements.txt && playwright install chromium
-    startCommand: python nimo-service/app.py
-    envVars:
       - key: NIMO_URL
         sync: false
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
       - key: PORT
-        value: 5007
+        value: 5005

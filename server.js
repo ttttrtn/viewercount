@@ -8,11 +8,45 @@ const chatManager = require('./services/chat/chatManager');
 
 const app = express();
 const server = http.createServer(app);
+
+// ALLOWED_ORIGIN - the Cloudflare Pages URL the frontend is deployed to,
+// e.g. https://viewer-counter.pages.dev. Comma-separated list supported
+// for staging + production. Left unset (or '*'), all origins are
+// allowed, which is fine for a read-only public overlay API with no
+// cookies/auth, but tightening it once you have a fixed Pages domain
+// costs nothing and is good practice.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGIN || '*')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+function isOriginAllowed(origin) {
+  if (ALLOWED_ORIGINS.includes('*')) return true;
+  return ALLOWED_ORIGINS.includes(origin);
+}
+
 const io = new SocketIOServer(server, {
-  cors: { origin: '*' },
+  cors: {
+    origin: (origin, cb) => cb(null, !origin || isOriginAllowed(origin)),
+  },
 });
 const PORT = process.env.PORT || 3000;
 
+// The frontend now normally lives on Cloudflare Pages (see
+// public/config.js), so the REST API needs real CORS headers - Express
+// doesn't add any by default, and a cross-origin fetch() from Pages to
+// this service would otherwise be blocked by the browser.
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (isOriginAllowed(origin)) {
+    res.set('Access-Control-Allow-Origin', origin || '*');
+    res.set('Vary', 'Origin');
+  }
+  next();
+});
+
+// Serving /public here too so the Render service still works standalone
+// (e.g. for local dev, or if you choose not to use Cloudflare Pages).
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Serve the chat overlay as its own OBS browser source, e.g.
@@ -79,13 +113,13 @@ server.listen(PORT, () => {
   console.log('RUMBLE_API_URL set:', Boolean(process.env.RUMBLE_API_URL));
   console.log('RUMBLE_CHANNEL:', process.env.RUMBLE_CHANNEL || '(empty)');
   console.log('TIKTOK_USERNAME:', process.env.TIKTOK_USERNAME || '(empty)');
-  console.log('TIKTOK_SERVICE_URL set:', Boolean(process.env.TIKTOK_SERVICE_URL));
+  console.log('PLATFORM_SIDECAR_URL set:', Boolean(process.env.PLATFORM_SIDECAR_URL));
   console.log('YOUTUBE_API_KEY set:', Boolean(process.env.YOUTUBE_API_KEY));
   console.log('YOUTUBE_CHANNEL_ID:', process.env.YOUTUBE_CHANNEL_ID || '(empty)');
   console.log('DEBUG_YOUTUBE:', Boolean(process.env.DEBUG_YOUTUBE));
-  console.log('YOUTUBE_CHAT_SERVICE_URL set:', Boolean(process.env.YOUTUBE_CHAT_SERVICE_URL));
   console.log('KICK_CHATROOM_ID set:', Boolean(process.env.KICK_CHATROOM_ID));
   console.log('INSTAGRAM_LIVE_COMMENTS_URL set:', Boolean(process.env.INSTAGRAM_LIVE_COMMENTS_URL));
+  console.log('ALLOWED_ORIGIN:', ALLOWED_ORIGINS.join(', '));
   console.log('---------------------');
 });
 

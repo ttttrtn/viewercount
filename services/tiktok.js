@@ -6,12 +6,12 @@
 // /status endpoint and normalizes the response into the same
 // { live, viewers } shape every other service in this project uses.
 //
-// TIKTOK_SERVICE_URL - base URL of the deployed Python service, e.g.
-//                       https://your-tiktok-service.onrender.com
-//                       (deploy tiktok-service/ as its own Render web
-//                       service - see README for instructions)
+// PLATFORM_SIDECAR_URL - base URL of the deployed combined TikTok+Nimo
+//                       Python sidecar (see /platform-sidecar), e.g.
+//                       https://viewer-counter-sidecar.onrender.com
+//                       Routes live under /tiktok/... on that one service.
 
-const TIKTOK_SERVICE_URL = (process.env.TIKTOK_SERVICE_URL || '').replace(
+const TIKTOK_SERVICE_URL = (process.env.PLATFORM_SIDECAR_URL || '').replace(
   /\/+$/,
   ''
 );
@@ -35,14 +35,14 @@ async function fetchWithTimeout(url, timeoutMs) {
 async function getTikTokStatus() {
   if (!TIKTOK_SERVICE_URL) {
     console.error(
-      '[tiktok] TIKTOK_SERVICE_URL is not set. Skipping TikTok check.'
+      '[tiktok] PLATFORM_SIDECAR_URL is not set. Skipping TikTok check.'
     );
     return { live: false, viewers: 0 };
   }
 
   try {
     const res = await fetchWithTimeout(
-      `${TIKTOK_SERVICE_URL}/status`,
+      `${TIKTOK_SERVICE_URL}/tiktok/status`,
       FETCH_TIMEOUT_MS
     );
 
