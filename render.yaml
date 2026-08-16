@@ -83,20 +83,27 @@ services:
   # session) that can't be recreated on-demand per request without
   # losing chat continuity.
   #
+  # Deployed via Docker (platform-sidecar/Dockerfile), not Render's
+  # native Python builder. The native builder's `playwright install
+  # chromium` step downloads the browser into a build-time cache
+  # directory that Render does not guarantee is present at runtime,
+  # producing "BrowserType.launch: Executable doesn't exist at
+  # /opt/render/.cache/ms-playwright/...". Docker sidesteps this
+  # entirely: Chromium is baked into the image itself, so there's no
+  # separate runtime filesystem for it to go missing from.
+  #
   # Deploy this, then copy its public Render URL into the main service's
   # PLATFORM_SIDECAR_URL env var above.
   - type: web
     name: viewer-counter-sidecar
-    env: python
+    runtime: docker
     plan: free
-    buildCommand: pip install -r platform-sidecar/requirements.txt && playwright install --with-deps chromium
-    startCommand: python platform-sidecar/app.py
+    dockerfilePath: ./platform-sidecar/Dockerfile
+    dockerContext: .
     envVars:
       - key: TIKTOK_USERNAME
         sync: false
       - key: NIMO_URL
         sync: false
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: "0"
       - key: PORT
         value: 5005

@@ -1,0 +1,11 @@
+# Keeps the platform-sidecar Docker build fast by not sending the whole
+# repo (Node app, frontend assets, other Python services) into the
+# build context - the Dockerfile only ever COPYs from platform-sidecar/.
+node_modules
+public
+services
+tiktok-service
+nimo-service
+youtube-chat-service
+.git
+*.md

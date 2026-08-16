@@ -1,4 +1,11 @@
 Flask>=3.0.0
 gunicorn==23.0.0
 TikTokLive>=6.6.5
-playwright>=1.44.0
+# Pinned exactly (not >=) to match the Playwright version baked into the
+# Docker base image in platform-sidecar/Dockerfile. Playwright's Python
+# package and its browser binaries are versioned together - if this
+# package version drifts from the browsers actually installed in the
+# image, Playwright looks for a browser revision folder that doesn't
+# exist and fails with "Executable doesn't exist at ...". Bump this and
+# the Dockerfile's FROM tag together, never independently.
+playwright==1.56.0
